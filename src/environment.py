@@ -12,7 +12,6 @@ class Reward(enum.Enum):
     PROXIMITY_DISCOUNT = 0.015
 
 
-
 class TorchSnakeEnv:
     def __init__(self, size=cfg.GAME_SIZE, num_envs=cfg.NUM_ENVS, device=cfg.DEVICE):
         self.size = size
@@ -23,6 +22,28 @@ class TorchSnakeEnv:
         # Maximum possible snake length (only playable area)
         playable_size = size - 2
         self.max_len = playable_size * playable_size
+        
+        # Pre-allocate constant tensors to avoid repeated creation
+        self.dirs = torch.tensor(
+            [[-1, 0], [0, 1], [1, 0], [0, -1]],
+            device=self.device,
+            dtype=torch.long
+        )
+        self.env_indices = torch.arange(self.num_envs, device=self.device)
+        self.max_len_range = torch.arange(self.max_len, device=self.device)
+        
+        # Pre-compute reward values as tensors
+        self.reward_eat = torch.tensor(Reward.EAT_APPLE.value, device=device)
+        self.reward_die = torch.tensor(Reward.DIE.value, device=device)
+        self.reward_prox = torch.tensor(Reward.PROXIMITY_REWARD.value, device=device)
+        self.reward_disc = torch.tensor(Reward.PROXIMITY_DISCOUNT.value, device=device)
+        
+        # Pre-compute walls channel (constant across all envs and steps)
+        self.walls_channel = torch.zeros((self.num_envs, self.size, self.size), device=self.device)
+        self.walls_channel[:, 0, :] = 1
+        self.walls_channel[:, -1, :] = 1
+        self.walls_channel[:, :, 0] = 1
+        self.walls_channel[:, :, -1] = 1
         
         self.reset()
 
@@ -42,12 +63,10 @@ class TorchSnakeEnv:
         self.direction[:, 0] = -1
 
         # Body grid: (num_envs, size, size) - each env has its own grid
-        # Walls are at borders (index 0 and size-1)
         self.body = torch.zeros((self.num_envs, self.size, self.size), device=self.device, dtype=torch.bool)
         self.body[:, center, center] = True
 
-        # Body segment history for tail tracking (stores positions from head to tail)
-        # Position 0 is the head, position 1 is next segment, etc.
+        # Body segment history for tail tracking
         self.body_positions = torch.full(
             (self.num_envs, self.max_len, 2), 
             -1, 
@@ -63,166 +82,162 @@ class TorchSnakeEnv:
         return self.get_obs()
 
     def spawn_food(self, env_mask=None):
-        """Spawn food in empty cells for specified environments (inside walls)
-        
-        Args:
-            env_mask: Boolean mask of environments to spawn food for. 
-                     If None, spawn for all environments.
-        """
+        """Spawn food in empty cells for specified environments (batched, no loops)"""
         if env_mask is None:
             env_mask = torch.ones(self.num_envs, dtype=torch.bool, device=self.device)
-        
-        env_indices = torch.where(env_mask)[0]
-        
-        for env_idx in env_indices:
-            # Find all free cells in playable area (not occupied by snake body or walls)
-            # Playable area is from index 1 to size-2 (inclusive)
-            playable_area = self.body[env_idx, 1:self.size-1, 1:self.size-1]
-            free_mask = ~playable_area  # Shape: (size-2, size-2)
-            free_coords = torch.nonzero(free_mask, as_tuple=False)  # Shape: (num_free, 2)
-            
-            if free_coords.shape[0] > 0:
-                # Randomly select one free cell
-                idx = torch.randint(0, free_coords.shape[0], (1,), device=self.device).item()
-                # Add 1 to coordinates to account for wall offset
-                self.food[env_idx] = free_coords[idx] + 1
-            else:
-                # Fallback: random position in playable area
-                self.food[env_idx] = torch.randint(1, self.size - 1, (2,), device=self.device)
+
+        # Early exit if no envs need food
+        if not env_mask.any():
+            return
+
+        # Playable area mask (exclude walls)
+        playable = self.body[:, 1:self.size-1, 1:self.size-1]
+        free_mask = ~playable
+
+        E, H, W = free_mask.shape
+        HW = H * W
+
+        # Flatten spatial dims
+        free_flat = free_mask.view(E, HW)
+
+        # Assign random scores to free cells only
+        rand = torch.rand((E, HW), device=self.device)
+        rand.masked_fill_(~free_flat, -1.0)
+
+        # Select best free index per env
+        best_idx = rand.argmax(dim=1)
+
+        # Convert flat index → (x, y) using floor division
+        y = best_idx % W
+        x = best_idx // W
+
+        # Offset because playable area starts at index 1
+        new_food = torch.stack([x + 1, y + 1], dim=1)
+
+        # Detect envs with NO free space (fallback case)
+        has_free = free_flat.any(dim=1)
+
+        # Only generate fallback for envs that need it
+        fallback = torch.randint(1, self.size - 1, (self.num_envs, 2), device=self.device)
+
+        # Choose free-cell spawn if possible, else fallback random
+        chosen_food = torch.where(has_free.unsqueeze(1), new_food, fallback)
+
+        # Apply only to requested envs
+        self.food = torch.where(env_mask.unsqueeze(1), chosen_food, self.food)
 
     def step(self, actions):
-        """Execute one step for all environments"""
         rewards = torch.zeros(self.num_envs, device=self.device)
 
-        # Cardinal directions: up, right, down, left
-        dirs = torch.tensor(
-            [[-1, 0], [0, 1], [1, 0], [0, -1]], 
-            device=self.device, 
-            dtype=self.direction.dtype
-        )
-
-        # Only update alive environments
         alive = ~self.done
-        
-        # Process turns for alive environments
+
+        # Early exit if all envs are done
+        if not alive.any():
+            obs, rotated_obs = self.get_obs()
+            return obs, rotated_obs, rewards, self.done
+
+        # -------- TURN LOGIC (VECTORIZED) --------
+        # Use pre-computed dirs tensor
+        matches = (self.direction.unsqueeze(1) == self.dirs).all(dim=2)
+        dir_idx = matches.long().argmax(dim=1)
+
         turn_left = (actions == 1) & alive
         turn_right = (actions == 2) & alive
 
-        if turn_left.any():
-            cur = self.direction[turn_left]
-            matches = (cur.unsqueeze(1) == dirs.unsqueeze(0)).all(dim=2)
-            idx = matches.long().argmax(dim=1)
-            new_idx = (idx - 1) % 4
-            self.direction[turn_left] = dirs[new_idx]
+        dir_idx = torch.where(turn_left, (dir_idx - 1) % 4, dir_idx)
+        dir_idx = torch.where(turn_right, (dir_idx + 1) % 4, dir_idx)
 
-        if turn_right.any():
-            cur = self.direction[turn_right]
-            matches = (cur.unsqueeze(1) == dirs.unsqueeze(0)).all(dim=2)
-            idx = matches.long().argmax(dim=1)
-            new_idx = (idx + 1) % 4
-            self.direction[turn_right] = dirs[new_idx]
+        self.direction = self.dirs[dir_idx]
 
-        # Compute new head position (only for alive)
-        new_head = self.head.clone()
-        new_head[alive] = self.head[alive] + self.direction[alive]
+        # -------- MOVE HEAD --------
+        new_head = self.head + self.direction
+        new_head = torch.where(alive.unsqueeze(1), new_head, self.head)
 
-        # Distance to food BEFORE move
-        old_dist = torch.sqrt(
-            (self.head[:, 0] - self.food[:, 0]).float() ** 2 +
-            (self.head[:, 1] - self.food[:, 1]).float() ** 2
-        )
+        # -------- DISTANCE REWARD --------
+        # Compute distance more efficiently
+        head_diff = (self.head - self.food).float()
+        new_head_diff = (new_head - self.food).float()
+        
+        old_dist_sq = (head_diff * head_diff).sum(dim=1)
+        new_dist_sq = (new_head_diff * new_head_diff).sum(dim=1)
+        
+        # Use squared distance to avoid sqrt
+        dist_delta_sq = old_dist_sq - new_dist_sq
+        
+        # Scale rewards appropriately for squared distance
+        pos_reward = torch.clamp(dist_delta_sq, min=0.0) * self.reward_prox
+        neg_reward = torch.clamp(dist_delta_sq, max=0.0) * self.reward_disc
+        rewards += (pos_reward + neg_reward) * alive.float()
 
-        # Distance to food AFTER move
-        new_dist = torch.sqrt(
-            (new_head[:, 0] - self.food[:, 0]).float() ** 2 +
-            (new_head[:, 1] - self.food[:, 1]).float() ** 2
-        )
-
-        # Positive reward when moving closer, slightly stronger penalty when moving away
-        dist_delta = old_dist - new_dist
-
-
-        pos_reward = torch.clamp(dist_delta, min=0.0) * Reward.PROXIMITY_REWARD.value
-        neg_reward = torch.clamp(dist_delta, max=0.0) * Reward.PROXIMITY_DISCOUNT.value
-
-        prox_reward = pos_reward + neg_reward
-        prox_reward = prox_reward * alive.float()
-
-        rewards += prox_reward
-
-        # Check wall collision (hitting border at 0 or size-1)
+        # -------- WALL COLLISION --------
         collision_wall = (
-            (new_head[:, 0] <= 0) | 
-            (new_head[:, 0] >= self.size - 1) | 
-            (new_head[:, 1] <= 0) | 
+            (new_head[:, 0] <= 0) |
+            (new_head[:, 0] >= self.size - 1) |
+            (new_head[:, 1] <= 0) |
             (new_head[:, 1] >= self.size - 1)
         ) & alive
 
-        # Check body collision - vectorized using body grid
-        collision_body = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
-        valid = alive & ~collision_wall
-        if valid.any():
-            valid_indices = torch.where(valid)[0]
-            collision_body[valid] = self.body[
-                valid_indices,
-                new_head[valid, 0],
-                new_head[valid, 1]
-            ]
+        # -------- BODY COLLISION (FULLY VECTORIZED) --------
+        nh_x = new_head[:, 0].clamp(0, self.size - 1)
+        nh_y = new_head[:, 1].clamp(0, self.size - 1)
 
-        # Determine which snakes died this step
+        collision_body = self.body[self.env_indices, nh_x, nh_y] & alive & ~collision_wall
+
         died = (collision_wall | collision_body) & alive
 
-        # Apply death penalty
-        rewards[died] = Reward.DIE.value
-        self.done[died] = True
+        rewards[died] = self.reward_die
+        self.done |= died
 
-        # Update alive mask after deaths
         still_alive = ~self.done
 
-        # Check if food was eaten (before updating position)
+        # -------- FOOD EAT --------
         ate = (new_head == self.food).all(dim=1) & still_alive
-        rewards[ate] = Reward.EAT_APPLE.value
+
+        rewards[ate] = self.reward_eat
         self.score[ate] += 1
 
-        # Update head position for alive snakes
-        self.head[still_alive] = new_head[still_alive]
+        # -------- UPDATE HEAD --------
+        self.head = torch.where(still_alive.unsqueeze(1), new_head, self.head)
 
-        # Update snake body for alive snakes
-        for env_idx in torch.where(still_alive)[0]:
-            if ate[env_idx]:
-                # Snake grows - increment length
-                self.snake_len[env_idx] += 1
-                
-                # Shift body positions and add new head
-                old_positions = self.body_positions[env_idx].clone()
-                self.body_positions[env_idx, 0] = self.head[env_idx]
-                length = self.snake_len[env_idx] - 1  # Old length before growth
-                self.body_positions[env_idx, 1:length+1] = old_positions[:length]
-            else:
-                # Snake moves - shift body positions
-                old_positions = self.body_positions[env_idx].clone()
-                self.body_positions[env_idx, 0] = self.head[env_idx]
-                length = self.snake_len[env_idx]
-                if length > 1:
-                    self.body_positions[env_idx, 1:length] = old_positions[:length-1]
-            
-            # Rebuild body grid from positions
-            self.body[env_idx] = False
-            length = self.snake_len[env_idx]
-            valid_positions = self.body_positions[env_idx, :length]
-            # Ensure positions are within playable area (not on walls)
-            valid_mask = (
-                (valid_positions[:, 0] > 0) & 
-                (valid_positions[:, 0] < self.size - 1) &
-                (valid_positions[:, 1] > 0) & 
-                (valid_positions[:, 1] < self.size - 1)
-            )
-            valid_positions = valid_positions[valid_mask]
-            
-            if valid_positions.shape[0] > 0:
-                self.body[env_idx, valid_positions[:, 0], valid_positions[:, 1]] = True
+        # -------- UPDATE LENGTH --------
+        self.snake_len += ate.long()
 
-        # Spawn new food only for environments that ate
+        # -------- SHIFT BODY POSITIONS (NO LOOPS) --------
+        # Shift positions down by 1
+        shifted = self.body_positions.roll(1, dims=1)
+        shifted[:, 0] = self.head
+
+        # Compute keep mask
+        keep_mask = self.max_len_range.unsqueeze(0) < self.snake_len.unsqueeze(1)
+
+        self.body_positions = torch.where(
+            still_alive.unsqueeze(1).unsqueeze(2),
+            shifted,
+            self.body_positions
+        )
+
+        # -------- REBUILD BODY GRID VIA SCATTER --------
+        self.body.zero_()
+
+        flat_env = self.env_indices.unsqueeze(1).expand_as(self.body_positions[..., 0])
+        coords = self.body_positions
+
+        valid_mask = (
+            keep_mask &
+            still_alive.unsqueeze(1) &
+            (coords[..., 0] > 0) &
+            (coords[..., 0] < self.size - 1) &
+            (coords[..., 1] > 0) &
+            (coords[..., 1] < self.size - 1)
+        )
+
+        env_ids = flat_env[valid_mask]
+        xs = coords[..., 0][valid_mask]
+        ys = coords[..., 1][valid_mask]
+
+        self.body[env_ids, xs, ys] = True
+
+        # -------- SPAWN FOOD --------
         if ate.any():
             self.spawn_food(env_mask=ate)
 
@@ -233,10 +248,10 @@ class TorchSnakeEnv:
         """Generate multi-channel observation grid"""
         obs = torch.zeros((self.num_envs, 4, self.size, self.size), device=self.device)
         
-        # Channel 0: Snake body (directly from body grid)
+        # Channel 0: Snake body
         obs[:, 0] = self.body.float()
         
-        # Channel 1: Snake head (only for alive snakes with valid positions inside walls)
+        # Channel 1: Snake head
         valid_head = (
             (self.head[:, 0] > 0) & 
             (self.head[:, 0] < self.size - 1) & 
@@ -245,18 +260,14 @@ class TorchSnakeEnv:
             ~self.done
         )
         if valid_head.any():
-            valid_indices = torch.where(valid_head)[0]
+            valid_indices = valid_head.nonzero(as_tuple=True)[0]
             obs[valid_indices, 1, self.head[valid_head, 0], self.head[valid_head, 1]] = 1
         
-        # Channel 2: Food (each env has its own food position, guaranteed inside walls)
-        env_indices = torch.arange(self.num_envs, device=self.device)
-        obs[env_indices, 2, self.food[:, 0], self.food[:, 1]] = 1
+        # Channel 2: Food
+        obs[self.env_indices, 2, self.food[:, 0], self.food[:, 1]] = 1
         
-        # Channel 3: Walls (border)
-        obs[:, 3, 0, :] = 1
-        obs[:, 3, -1, :] = 1
-        obs[:, 3, :, 0] = 1
-        obs[:, 3, :, -1] = 1
+        # Channel 3: Walls (pre-computed constant)
+        obs[:, 3] = self.walls_channel
         
         # Create rotated observations where snake always faces UP
         rotated_obs = self._rotate_obs_to_up(obs)
@@ -264,41 +275,30 @@ class TorchSnakeEnv:
         return obs, rotated_obs
     
     def _rotate_obs_to_up(self, obs):
-        """Rotate observations so snake always faces UP
-        
-        Args:
-            obs: Original observations (num_envs, 4, size, size)
-            
-        Returns:
-            Rotated observations where snake direction is normalized to UP
-        """
-        # Cardinal directions: up, right, down, left
-        dirs = torch.tensor(
-            [[-1, 0], [0, 1], [1, 0], [0, -1]], 
-            device=self.device, 
-            dtype=self.direction.dtype
+        """Rotate observations so snake always faces UP (no loops)"""
+        # Match each env direction to dirs
+        matches = (self.direction.unsqueeze(1) == self.dirs).all(dim=2)
+        dir_idx = matches.long().argmax(dim=1)
+
+        # Rotation needed: RIGHT→1, DOWN→2, LEFT→3, UP→0
+        k = dir_idx
+
+        # Precompute all 4 rotations of the full batch
+        all_rots = torch.stack([
+            obs,
+            torch.rot90(obs, k=1, dims=(2, 3)),
+            torch.rot90(obs, k=2, dims=(2, 3)),
+            torch.rot90(obs, k=3, dims=(2, 3))
+        ], dim=1)
+
+        # Select correct rotation per env
+        rotated_obs = all_rots[self.env_indices, k]
+
+        # Keep original obs if env is done
+        rotated_obs = torch.where(
+            self.done.view(-1, 1, 1, 1),
+            obs,
+            rotated_obs
         )
-        
-        rotated_obs = obs.clone()
-        
-        for env_idx in range(self.num_envs):
-            if self.done[env_idx]:
-                continue
-                
-            # Find current direction index
-            cur_dir = self.direction[env_idx]
-            matches = (cur_dir.unsqueeze(0) == dirs).all(dim=1)
-            dir_idx = matches.long().argmax().item()
-            
-            # Rotation needed: 0=UP (no rotation), 1=RIGHT (rotate 90° CCW), 
-            # 2=DOWN (rotate 180°), 3=LEFT (rotate 90° CW)
-            if dir_idx == 0:  # Already facing UP
-                continue
-            elif dir_idx == 1:  # Facing RIGHT, rotate 90° CCW (k=1)
-                rotated_obs[env_idx] = torch.rot90(obs[env_idx], k=1, dims=(1, 2))
-            elif dir_idx == 2:  # Facing DOWN, rotate 180° (k=2)
-                rotated_obs[env_idx] = torch.rot90(obs[env_idx], k=2, dims=(1, 2))
-            elif dir_idx == 3:  # Facing LEFT, rotate 90° CW (k=3 or -1)
-                rotated_obs[env_idx] = torch.rot90(obs[env_idx], k=3, dims=(1, 2))
-        
+
         return rotated_obs

@@ -4,7 +4,7 @@ import time
 import torch
 
 import config as cfg
-from agent import PPOAgent
+from agent import PPOAgent, SpatialAwarePPOAgent
 from environment import TorchSnakeEnv
 from visualizer import display_game_state
 
@@ -24,10 +24,10 @@ def evaluate_agent(model_path, num_envs=NUM_EVAL_ENVS, num_runs=1, sleep_time=SL
     """
     # Load environment and agent
     env = TorchSnakeEnv(size=cfg.GAME_SIZE, num_envs=num_envs, device=cfg.DEVICE)
-    agent = PPOAgent().to(cfg.DEVICE)
+    agent = SpatialAwarePPOAgent().to(cfg.DEVICE)
     
     # Load trained weights
-    if os.path.exists(model_path):
+    if os.path.exists(model_path ):
         agent.load_state_dict(torch.load(model_path, map_location=cfg.DEVICE))
         print(f"✓ Loaded model from {model_path}")
     else:
@@ -73,7 +73,7 @@ def evaluate_agent(model_path, num_envs=NUM_EVAL_ENVS, num_runs=1, sleep_time=SL
                     )
                     
                     # Get greedy actions (no exploration during evaluation)
-                    actions, _ = agent.get_action_greedy(rotated_obs)
+                    actions, _, _, _ = agent.sample_action(rotated_obs)
                     
                     # Step environment
                     next_obs, next_rotated_obs, rewards, dones = env.step(actions)
@@ -135,7 +135,7 @@ if __name__ == "__main__":
     parser.add_argument(
         '--model', 
         type=str, 
-        default=os.path.join(cfg.MODEL_DIR, "best_model.pt"),
+        default=os.path.join(cfg.MODEL_DIR, "SpatialAwarePPOAgent/best_model.pt"),
         help='Path to model checkpoint (default: models/best_model.pt)'
     )
     parser.add_argument(
