@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: Lint and test on ${{ matrix.os }} (CPU-only PyTorch)
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          enable-cache: true
+
+      - name: Install dependencies with CPU-only PyTorch (no CUDA download)
+        run: uv sync --locked --no-group cuda --group cpu
+
+      - name: Lint with ruff
+        run: uv run --no-sync ruff check .
+
+      - name: Check formatting with ruff
+        run: uv run --no-sync ruff format --check .
+
+      - name: Run the test suite
+        run: uv run --no-sync pytest
