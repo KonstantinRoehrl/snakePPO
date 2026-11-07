@@ -1,0 +1,17 @@
+# Tiny CPU run used by the test suite and CI: 4 updates, finishes in seconds.
+env:
+  board_size: 8
+  num_envs: 8
+  starvation_steps: 32
+agent:
+  name: cnn
+ppo:
+  rollout_steps: 16
+  update_epochs: 2
+  minibatch_size: 64
+train:
+  total_env_steps: 512
+  eval_interval: 2
+  eval_episodes: 4
+  device: cpu
+  name: smoke
