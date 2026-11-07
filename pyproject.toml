@@ -49,15 +49,6 @@ build-backend = "uv_build"
 [tool.ruff]
 line-length = 100
 target-version = "py312"
-# pre-C1 scripts kept for reference until Task 10 deletes them
-extend-exclude = [
-  "src/agent.py",
-  "src/config.py",
-  "src/environment.py",
-  "src/eval.py",
-  "src/train.py",
-  "src/visualizer.py",
-]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "UP", "B", "SIM"]
