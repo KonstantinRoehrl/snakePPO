@@ -1,4 +1,4 @@
-"""``snakeppo`` command line: train, eval, agents, compare."""
+"""``snakeppo`` command line: train, eval, agents, compare, results, serve."""
 
 from __future__ import annotations
 
@@ -15,8 +15,16 @@ from snakeppo.agents import REGISTRY, available_agents, build_agent, count_param
 from snakeppo.agents.networks import PolicyNetwork
 from snakeppo.builders import EVAL_SEED_OFFSET, make_env, resolve_device
 from snakeppo.config import Config, ConfigError, config_from_dict, load_config, validate
+from snakeppo.dashboard.server import DEFAULT_PORT
 from snakeppo.evaluation import evaluate
-from snakeppo.runs import find_runs, load_checkpoint, resolve_checkpoint, summarize_run
+from snakeppo.results import FORMATS, format_results, results_table
+from snakeppo.runs import (
+    find_runs,
+    load_checkpoint,
+    load_run,
+    resolve_checkpoint,
+    summarize_run,
+)
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -51,6 +59,18 @@ def _parser() -> argparse.ArgumentParser:
 
     compare = commands.add_parser("compare", help="summarise runs as a table")
     compare.add_argument("paths", nargs="*", type=Path, default=[Path("runs")])
+
+    results = commands.add_parser(
+        "results", help="judge seed groups against their baseline group across seeds"
+    )
+    results.add_argument("paths", nargs="*", type=Path, default=[Path("runs")])
+    results.add_argument("--baseline", metavar="GROUP", help="compare every group with GROUP")
+    results.add_argument("--format", choices=FORMATS, default="text")
+
+    serve = commands.add_parser("serve", help="open the read-only local dashboard")
+    serve.add_argument("--runs-dir", type=Path, default=Path("runs"))
+    serve.add_argument("--port", type=int, default=DEFAULT_PORT)
+    serve.add_argument("--open", action="store_true", help="open the dashboard in the browser")
     return parser
 
 
@@ -211,9 +231,39 @@ def _compare(args: argparse.Namespace) -> int:
     return 0
 
 
+def _results(args: argparse.Namespace) -> int:
+    runs = find_runs(args.paths)
+    if not runs:
+        joined = ", ".join(str(p) for p in args.paths)
+        print(f"No run folders found in {joined}.")
+        return 1
+    table = results_table([load_run(run) for run in runs], args.baseline)
+    if not table.rows:
+        print(
+            f"No seed groups found ({table.left_out} ungrouped run(s)); "
+            "create one with 'snakeppo sweep' or 'snakeppo train --group'."
+        )
+        return 1
+    print(format_results(table, args.format), end="")
+    return 0
+
+
+def _serve(args: argparse.Namespace) -> int:
+    from snakeppo.dashboard.server import serve
+
+    return serve(args.runs_dir, args.port, open_browser=args.open)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
-    handlers = {"train": _train, "eval": _eval, "agents": _agents, "compare": _compare}
+    handlers = {
+        "train": _train,
+        "eval": _eval,
+        "agents": _agents,
+        "compare": _compare,
+        "results": _results,
+        "serve": _serve,
+    }
     try:
         return handlers[args.command](args)
     except (ConfigError, ValueError, FileNotFoundError) as error:
