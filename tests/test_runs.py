@@ -1,4 +1,5 @@
 import json
+import math
 import os
 from datetime import datetime
 
@@ -6,6 +7,7 @@ import pytest
 import torch
 import yaml
 
+from snakeppo.builders import capture_rng_state
 from snakeppo.config import Config, apply_overrides, save_config
 from snakeppo.runs import (
     SCHEMA_VERSION,
@@ -204,11 +206,24 @@ def test_checkpoint_round_trip_and_resolution(tmp_path):
     optimizer = torch.optim.Adam(model.parameters())
     path = run_dir / "checkpoints" / "best.pt"
     save_checkpoint(
-        path, model=model, optimizer=optimizer, update=5, env_steps=640, config={"a": 1}
+        path,
+        model=model,
+        optimizer=optimizer,
+        update=5,
+        env_steps=640,
+        config={"a": 1},
+        best_eval=-math.inf,
+        wall_time=12.5,
+        rng=capture_rng_state(torch.device("cpu")),
+        env={"head": torch.zeros(2, 2, dtype=torch.long)},
     )
     loaded = load_checkpoint(path)
+    assert loaded["schema_version"] == SCHEMA_VERSION
     assert loaded["update"] == 5 and loaded["env_steps"] == 640 and loaded["config"] == {"a": 1}
+    assert loaded["best_eval"] == -math.inf and loaded["wall_time"] == 12.5
+    assert loaded["rng"]["cuda"] is None and torch.equal(loaded["env"]["head"], torch.zeros(2, 2))
     assert torch.equal(loaded["model"]["weight"], model.weight)
+    assert not list(path.parent.glob(".*.tmp"))
     assert resolve_checkpoint(run_dir) == (run_dir, path)
     assert resolve_checkpoint(path) == (run_dir, path)
     with pytest.raises(FileNotFoundError, match="last"):

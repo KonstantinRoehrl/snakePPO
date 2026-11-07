@@ -4,14 +4,23 @@ from __future__ import annotations
 
 import math
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 import torch
 from tqdm import tqdm
 
 from snakeppo.agents import build_agent, count_parameters
-from snakeppo.builders import EVAL_SEED_OFFSET, make_env, resolve_device, seed_everything
+from snakeppo.agents.networks import PolicyNetwork
+from snakeppo.builders import (
+    EVAL_SEED_OFFSET,
+    capture_rng_state,
+    make_env,
+    resolve_device,
+    seed_everything,
+)
 from snakeppo.config import Config, config_to_dict, save_config, validate
+from snakeppo.env import TorchSnakeEnv
 from snakeppo.evaluation import evaluate
 from snakeppo.ppo.functional import (
     compute_gae,
@@ -27,6 +36,7 @@ from snakeppo.runs import (
     create_run_dir,
     save_checkpoint,
     total_updates,
+    update_run_info,
     write_run_info,
 )
 
@@ -48,21 +58,27 @@ class RolloutBuffer:
         self.done = torch.zeros(shape, dtype=torch.bool, device=device)
 
 
+@dataclass(frozen=True)
+class Progress:
+    """Where a run's loop starts: zeros for a new run, the checkpoint's values on resume."""
+
+    update: int = 0
+    env_steps: int = 0
+    best_eval: float = -math.inf
+    wall_time: float = 0.0
+
+
 def train(config: Config, *, progress: bool = True) -> Path:
     """Train one run described by ``config``; returns the run folder it wrote."""
     validate(config)
     device = resolve_device(config.train.device)
     seed_everything(config.env.seed, config.train.deterministic)
-    env_cfg, ppo = config.env, config.ppo
+    env_cfg = config.env
     env = make_env(
         env_cfg, config.reward, num_envs=env_cfg.num_envs, device=device, seed=env_cfg.seed
     )
     model = build_agent(config.agent.name, env_cfg.board_size, **config.agent.kwargs).to(device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=ppo.lr, eps=1e-5)
-
-    steps, n = ppo.rollout_steps, env_cfg.num_envs
-    batch_size = steps * n
-    num_updates = total_updates(config)
+    optimizer = torch.optim.Adam(model.parameters(), lr=config.ppo.lr, eps=1e-5)
 
     run_dir = create_run_dir(config.train.runs_dir, config.train.name, env_cfg.seed)
     save_config(config, run_dir / CONFIG_FILE)
@@ -72,18 +88,79 @@ def train(config: Config, *, progress: bool = True) -> Path:
         agent=config.agent.name,
         param_count=count_parameters(model),
         device=str(device),
-        total_updates=num_updates,
-        group=None,
+        total_updates=total_updates(config),
+        group=config.train.group,
     )
-    config_dict = config_to_dict(config)
     print(f"Training '{config.agent.name}' on {device}; writing run folder {run_dir}")
-    buffer = RolloutBuffer(steps, n, env.obs_shape, device)
     obs = env.reset()
-    env_steps, best_eval = 0, -math.inf
-    checkpoints = run_dir / CHECKPOINT_DIR
+    session = _Session(run_dir, config, device, env, model, optimizer)
+    return _run(session, obs, Progress(), progress=progress)
 
-    with MetricsLogger(run_dir) as logger:
-        bar = tqdm(range(1, num_updates + 1), desc="Training", unit="update", disable=not progress)
+
+@dataclass(frozen=True)
+class _Session:
+    """The live objects one training process works on."""
+
+    run_dir: Path
+    config: Config
+    device: torch.device
+    env: TorchSnakeEnv
+    model: PolicyNetwork
+    optimizer: torch.optim.Optimizer
+
+
+def _run(
+    session: _Session,
+    obs: torch.Tensor,
+    start: Progress,
+    *,
+    progress: bool,
+    purge_step: int | None = None,
+) -> Path:
+    """Loop from ``start.update + 1`` to the last update, recording the outcome in run.json."""
+    run_dir = session.run_dir
+    try:
+        best_eval = _loop(session, obs, start, progress=progress, purge_step=purge_step)
+    except KeyboardInterrupt:
+        update_run_info(run_dir, status="interrupted")
+        print(f"Interrupted. Continue with: snakeppo train --resume {run_dir}")
+        raise
+    except Exception:
+        update_run_info(run_dir, status="failed")
+        raise
+    update_run_info(run_dir, status="finished")
+    print(f"Finished training: best eval score {best_eval:.2f}. Run folder: {run_dir}")
+    return run_dir
+
+
+def _loop(
+    session: _Session,
+    obs: torch.Tensor,
+    start: Progress,
+    *,
+    progress: bool,
+    purge_step: int | None,
+) -> float:
+    run_dir, config, device = session.run_dir, session.config, session.device
+    env, model, optimizer = session.env, session.model, session.optimizer
+    env_cfg, ppo = config.env, config.ppo
+    steps, n = ppo.rollout_steps, env_cfg.num_envs
+    batch_size = steps * n
+    num_updates = total_updates(config)
+    buffer = RolloutBuffer(steps, n, env.obs_shape, device)
+    env_steps, best_eval = start.env_steps, start.best_eval
+    checkpoints = run_dir / CHECKPOINT_DIR
+    config_dict = config_to_dict(config)
+
+    with MetricsLogger(run_dir, wall_time_offset=start.wall_time, purge_step=purge_step) as logger:
+        bar = tqdm(
+            range(start.update + 1, num_updates + 1),
+            desc="Training",
+            unit="update",
+            initial=start.update,
+            total=num_updates,
+            disable=not progress,
+        )
         for update in bar:
             # the first update runs at the start value, the last one exactly at the end value
             fraction = (update - 1) / max(num_updates - 1, 1)
@@ -149,8 +226,8 @@ def train(config: Config, *, progress: bool = True) -> Path:
             for _ in range(ppo.update_epochs):
                 epochs_run += 1
                 order = torch.randperm(batch_size, device=device)
-                for start in range(0, batch_size, ppo.minibatch_size):
-                    mb = order[start : start + ppo.minibatch_size]
+                for start_index in range(0, batch_size, ppo.minibatch_size):
+                    mb = order[start_index : start_index + ppo.minibatch_size]
                     logits, new_values = model(flat_obs[mb].float())
                     dist = torch.distributions.Categorical(logits=logits)
                     out = ppo_loss(
@@ -215,7 +292,9 @@ def train(config: Config, *, progress: bool = True) -> Path:
                     "train/return_mean": torch.cat(finished_returns).mean().item(),
                 }
 
-            if update % config.train.eval_interval == 0 or update == num_updates:
+            is_eval = update % config.train.eval_interval == 0 or update == num_updates
+            improved = False
+            if is_eval:
                 stats = evaluate(
                     model,
                     env_cfg,
@@ -225,19 +304,24 @@ def train(config: Config, *, progress: bool = True) -> Path:
                     seed=env_cfg.seed + EVAL_SEED_OFFSET,
                 )
                 metrics |= stats.as_metrics()
+                improved = stats.score_mean > best_eval
+                best_eval = max(best_eval, stats.score_mean)
+                bar.set_postfix(eval_score=f"{stats.score_mean:.2f}", best=f"{best_eval:.2f}")
+            # the metrics line goes first, so every checkpoint's update has its line
+            logger.log(update, env_steps, metrics)
+            if is_eval or update % config.train.checkpoint_interval == 0:
                 state = {
                     "model": model,
                     "optimizer": optimizer,
                     "update": update,
                     "env_steps": env_steps,
                     "config": config_dict,
+                    "best_eval": best_eval,
+                    "wall_time": logger.elapsed(),
+                    "rng": capture_rng_state(device),
+                    "env": env.state_dict(),
                 }
                 save_checkpoint(checkpoints / "last.pt", **state)
-                if stats.score_mean > best_eval:
-                    best_eval = stats.score_mean
+                if improved:
                     save_checkpoint(checkpoints / "best.pt", **state)
-                bar.set_postfix(eval_score=f"{stats.score_mean:.2f}", best=f"{best_eval:.2f}")
-            logger.log(update, env_steps, metrics)
-
-    print(f"Finished training: best eval score {best_eval:.2f}. Run folder: {run_dir}")
-    return run_dir
+    return best_eval

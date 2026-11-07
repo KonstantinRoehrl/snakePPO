@@ -1,9 +1,11 @@
-"""Turn config sections into live objects: device, seeding, environments."""
+"""Turn config sections into live objects: device, seeding and RNG state, environments."""
 
 from __future__ import annotations
 
 import os
 import random
+from collections.abc import Mapping
+from typing import Any
 
 import numpy as np
 import torch
@@ -35,6 +37,44 @@ def seed_everything(seed: int, deterministic: bool = False) -> None:
         torch.use_deterministic_algorithms(True)
         torch.backends.cudnn.benchmark = False
         torch.backends.cudnn.deterministic = True
+
+
+def capture_rng_state(device: torch.device) -> dict[str, Any]:
+    """Python, numpy, torch CPU and (on CUDA) every CUDA generator's state.
+
+    numpy's key array is stored as a tensor so ``torch.load(weights_only=True)`` accepts it.
+    """
+    np_state = np.random.get_state(legacy=False)
+    return {
+        "python": random.getstate(),
+        "numpy": {
+            "bit_generator": np_state["bit_generator"],
+            "key": torch.from_numpy(np_state["state"]["key"].astype(np.int64)),
+            "pos": int(np_state["state"]["pos"]),
+            "has_gauss": int(np_state["has_gauss"]),
+            "gauss": float(np_state["gauss"]),
+        },
+        "torch": torch.get_rng_state(),
+        "cuda": torch.cuda.get_rng_state_all() if device.type == "cuda" else None,
+    }
+
+
+def restore_rng_state(state: Mapping[str, Any]) -> None:
+    """Inverse of :func:`capture_rng_state`."""
+    version, internal, gauss = state["python"]
+    random.setstate((version, tuple(internal), gauss))
+    numpy = state["numpy"]
+    np.random.set_state(
+        {
+            "bit_generator": numpy["bit_generator"],
+            "state": {"key": numpy["key"].numpy().astype(np.uint32), "pos": numpy["pos"]},
+            "has_gauss": numpy["has_gauss"],
+            "gauss": numpy["gauss"],
+        }
+    )
+    torch.set_rng_state(state["torch"])
+    if state["cuda"] is not None:
+        torch.cuda.set_rng_state_all(state["cuda"])
 
 
 def make_env(

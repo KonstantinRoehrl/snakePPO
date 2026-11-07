@@ -337,21 +337,29 @@ def save_checkpoint(
     update: int,
     env_steps: int,
     config: Mapping[str, Any],
+    best_eval: float,
+    wall_time: float,
+    rng: Mapping[str, Any],
+    env: Mapping[str, Any],
 ) -> None:
-    torch.save(
-        {
-            "model": model.state_dict(),
-            "optimizer": optimizer.state_dict(),
-            "update": update,
-            "env_steps": env_steps,
-            "config": dict(config),
-        },
-        path,
-    )
+    """Write a schema-2 checkpoint atomically, so a Ctrl+C mid-save never leaves half a file."""
+    state = {
+        "schema_version": SCHEMA_VERSION,
+        "model": model.state_dict(),
+        "optimizer": optimizer.state_dict(),
+        "update": update,
+        "env_steps": env_steps,
+        "config": dict(config),
+        "best_eval": best_eval,
+        "wall_time": wall_time,
+        "rng": dict(rng),
+        "env": dict(env),
+    }
+    replace_atomically(path, lambda temp: torch.save(state, temp))
 
 
 def load_checkpoint(path: str | Path, map_location: str | torch.device = "cpu") -> dict[str, Any]:
-    """Returns the dict ``save_checkpoint`` wrote: model, optimizer, update, env_steps, config."""
+    """Returns the dict ``save_checkpoint`` wrote (schema-1 files lack the schema-2 keys)."""
     return torch.load(path, map_location=map_location, weights_only=True)
 
 
