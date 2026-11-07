@@ -75,6 +75,8 @@ class TrainConfig:
     name: str = "run"
     runs_dir: str = "runs"
     deterministic: bool = False
+    checkpoint_interval: int = 10
+    group: str | None = None
 
 
 @dataclass
@@ -195,7 +197,9 @@ def validate(config: Config) -> Config:
     for name in ("rollout_steps", "update_epochs", "minibatch_size"):
         if getattr(config.ppo, name) < 1:
             raise ConfigError(f"ppo.{name} must be at least 1")
-    for name in ("total_env_steps", "eval_interval", "eval_episodes"):
+    for name in ("total_env_steps", "eval_interval", "eval_episodes", "checkpoint_interval"):
         if getattr(config.train, name) < 1:
             raise ConfigError(f"train.{name} must be at least 1")
+    if config.train.group is not None and not config.train.group.strip():
+        raise ConfigError("train.group must be a non-empty name or null")
     return config

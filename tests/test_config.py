@@ -1,12 +1,14 @@
 from pathlib import Path
 
 import pytest
+import yaml
 
 from snakeppo.config import (
     Config,
     ConfigError,
     apply_overrides,
     config_from_dict,
+    config_to_dict,
     load_config,
     save_config,
 )
@@ -100,6 +102,23 @@ PRESETS = Path(__file__).resolve().parents[1] / "configs"
 def test_baseline_preset_states_exactly_the_code_defaults():
     expected = apply_overrides(Config(), ["train.name=baseline"])
     assert load_config(PRESETS / "baseline.yaml") == expected
+
+
+def test_baseline_preset_names_every_config_key():
+    data = yaml.safe_load((PRESETS / "baseline.yaml").read_text(encoding="utf-8"))
+    defaults = config_to_dict(Config())
+    assert {s: set(data[s]) for s in data} == {s: set(defaults[s]) for s in defaults}
+
+
+def test_bookkeeping_keys_default_to_today_and_are_validated():
+    train = Config().train
+    assert train.checkpoint_interval == 10
+    assert train.group is None
+    assert apply_overrides(Config(), ["train.group=sweep@1"]).train.group == "sweep@1"
+    with pytest.raises(ConfigError, match="train.checkpoint_interval must be at least 1"):
+        apply_overrides(Config(), ["train.checkpoint_interval=0"])
+    with pytest.raises(ConfigError, match="train.group must be a non-empty name or null"):
+        apply_overrides(Config(), ["train.group=' '"])
 
 
 def test_tuned_preset_turns_every_switch_on():
