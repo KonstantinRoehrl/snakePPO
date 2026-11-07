@@ -6,6 +6,7 @@ import argparse
 import sys
 import time
 from collections.abc import Sequence
+from dataclasses import replace
 from pathlib import Path
 
 import torch
@@ -13,7 +14,7 @@ import torch
 from snakeppo.agents import REGISTRY, available_agents, build_agent, count_parameters
 from snakeppo.agents.networks import PolicyNetwork
 from snakeppo.builders import EVAL_SEED_OFFSET, make_env, resolve_device
-from snakeppo.config import Config, ConfigError, config_from_dict, load_config
+from snakeppo.config import Config, ConfigError, config_from_dict, load_config, validate
 from snakeppo.evaluation import evaluate
 from snakeppo.runs import find_runs, load_checkpoint, resolve_checkpoint, summarize_run
 
@@ -60,13 +61,14 @@ def _train(args: argparse.Namespace) -> int:
     from snakeppo.ppo.trainer import train
 
     overrides = list(args.overrides)
-    if args.agent:
-        overrides.append(f"agent.name={args.agent}")
-    if args.name:
-        overrides.append(f"train.name={args.name}")
     if args.seed is not None:
         overrides.append(f"env.seed={args.seed}")
     config = load_config(args.config, overrides)
+    # Applied after parsing so names like "2" or "off" stay text instead of becoming YAML values.
+    if args.agent:
+        config = validate(replace(config, agent=replace(config.agent, name=args.agent)))
+    if args.name:
+        config = validate(replace(config, train=replace(config.train, name=args.name)))
     train(config)
     return 0
 

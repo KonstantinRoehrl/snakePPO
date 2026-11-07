@@ -113,3 +113,10 @@ def test_tuned_preset_turns_every_switch_on():
 @pytest.mark.parametrize("path", sorted(PRESETS.glob("*.yaml")), ids=lambda p: p.name)
 def test_every_preset_loads(path):
     load_config(path)
+
+
+def test_exponential_entropy_schedule_needs_a_positive_start_coefficient():
+    with pytest.raises(
+        ConfigError, match=r"ppo\.entropy_coef.*ppo\.entropy_coef_final.*exponential"
+    ):
+        apply_overrides(Config(), ["ppo.entropy_schedule=exponential", "ppo.entropy_coef=0"])

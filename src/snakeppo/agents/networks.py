@@ -19,6 +19,34 @@ class PolicyNetwork(nn.Module):
         return actions, dist.log_prob(actions), value
 
 
+def _pooling_bins(size: int, out: int) -> list[tuple[int, int]]:
+    """Start/end of each pooling window, using the same boundaries as torch's adaptive pool."""
+    return [(i * size // out, -(-(i + 1) * size // out)) for i in range(out)]
+
+
+class DeterministicAdaptiveAvgPool2d(nn.Module):
+    """``nn.AdaptiveAvgPool2d`` built from slices and means.
+
+    The built-in layer has no deterministic CUDA backward, so it breaks ``train.deterministic``.
+    Rows are averaged first, then columns; every window is a rectangle, so the result is the same.
+    """
+
+    def __init__(self, output_size: tuple[int, int]) -> None:
+        super().__init__()
+        self.output_size = output_size
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        out_h, out_w = self.output_size
+        rows = torch.stack(
+            [x[:, :, start:end, :].mean(dim=2) for start, end in _pooling_bins(x.shape[2], out_h)],
+            dim=2,
+        )
+        return torch.stack(
+            [rows[..., start:end].mean(dim=-1) for start, end in _pooling_bins(x.shape[3], out_w)],
+            dim=-1,
+        )
+
+
 class CNNPolicy(PolicyNetwork):
     """Former ``PPOAgent``."""
 
@@ -36,7 +64,7 @@ class CNNPolicy(PolicyNetwork):
             nn.ReLU(),
             nn.Conv2d(128, 256, 3, stride=2, padding=1),
             nn.ReLU(),
-            nn.AdaptiveAvgPool2d((4, 4)),
+            DeterministicAdaptiveAvgPool2d((4, 4)),
             nn.Flatten(),
             nn.Linear(256 * 4 * 4, 512),
             nn.ReLU(),

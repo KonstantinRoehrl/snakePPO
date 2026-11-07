@@ -35,7 +35,8 @@ Values are applied in this order, each step overriding the previous one:
 2. the `--config` YAML file (a partial file is fine);
 3. each `--set SECTION.KEY=VALUE`, in order (the value is parsed as YAML, so `null`,
    `true` and numbers work);
-4. `--agent`, `--name` and `--seed`, which set `agent.name`, `train.name` and `env.seed`.
+4. `--agent`, `--name` and `--seed`, which set `agent.name`, `train.name` and `env.seed`
+   (`--agent` and `--name` are plain text, so `--name 2` and `--name off` work).
 
 Unknown sections or keys and values of the wrong type are rejected with an error.
 
@@ -48,7 +49,7 @@ Each switch below defaults to the vanilla baseline.
 | `ppo.lr_schedule` | `constant`, `linear` | `constant` | `linear` decays `ppo.lr` to 0 over the run. |
 | `ppo.clip_value_loss` | `true`, `false` | `false` | Clips the value update to `ppo.clip_eps` around the rollout's values. |
 | `ppo.entropy_schedule` | `constant`, `linear`, `exponential` | `constant` | Moves the entropy coefficient from `ppo.entropy_coef` to `ppo.entropy_coef_final` over the run. |
-| `ppo.entropy_coef_final` | float (> 0 for `exponential`) | `0.0005` | End value of the entropy schedule; unused with `constant`. |
+| `ppo.entropy_coef_final` | float (> 0 for `exponential`) | `0.0005` | End value of the entropy schedule; unused with `constant`. `exponential` also needs `ppo.entropy_coef` > 0. |
 | `ppo.target_kl` | float or `null` | `null` | Stops an update's epochs early once a minibatch's approximate KL exceeds it. |
 | `train.deterministic` | `true`, `false` | `false` | Forces deterministic torch kernels so GPU runs repeat exactly (slower). |
 

@@ -180,8 +180,13 @@ def validate(config: Config) -> Config:
         raise ConfigError(f"ppo.lr_schedule must be one of {', '.join(LR_SCHEDULES)}")
     if config.ppo.entropy_schedule not in ENTROPY_SCHEDULES:
         raise ConfigError(f"ppo.entropy_schedule must be one of {', '.join(ENTROPY_SCHEDULES)}")
-    if config.ppo.entropy_schedule == "exponential" and config.ppo.entropy_coef_final <= 0:
-        raise ConfigError("ppo.entropy_coef_final must be > 0 for the exponential schedule")
+    if config.ppo.entropy_schedule == "exponential" and (
+        config.ppo.entropy_coef <= 0 or config.ppo.entropy_coef_final <= 0
+    ):
+        raise ConfigError(
+            "ppo.entropy_coef and ppo.entropy_coef_final must both be > 0 "
+            "for the exponential schedule"
+        )
     if config.env.board_size < 5:
         raise ConfigError("env.board_size must be at least 5 (a 3x3 playable area)")
     for name in ("num_envs", "starvation_steps"):

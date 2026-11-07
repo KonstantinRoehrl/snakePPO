@@ -1,6 +1,8 @@
 import json
+import os
 from pathlib import Path
 
+import pytest
 import torch
 
 from snakeppo.agents import build_agent
@@ -77,3 +79,61 @@ def test_switches_run_end_to_end(tmp_path):
     assert lines[1]["ppo/lr"] < lines[0]["ppo/lr"]
     assert lines[1]["ppo/entropy_coef"] < lines[0]["ppo/entropy_coef"]
     assert all(line["ppo/epochs"] <= 2 for line in lines)
+
+
+def _metric_lines(run_dir):
+    return [json.loads(x) for x in (run_dir / "metrics.jsonl").read_text("utf-8").splitlines()]
+
+
+def test_lr_schedule_starts_at_the_base_lr_and_ends_at_zero(tmp_path):
+    config = _smoke_config(tmp_path, "ppo.lr_schedule=linear")
+    lines = _metric_lines(train(config, progress=False))
+    assert lines[0]["ppo/lr"] == config.ppo.lr
+    assert lines[-1]["ppo/lr"] == 0.0
+
+
+@pytest.mark.parametrize("schedule", ["linear", "exponential"])
+def test_entropy_schedule_starts_at_the_start_value_and_ends_at_the_final_value(tmp_path, schedule):
+    config = _smoke_config(tmp_path, f"ppo.entropy_schedule={schedule}")
+    lines = _metric_lines(train(config, progress=False))
+    assert lines[0]["ppo/entropy_coef"] == pytest.approx(config.ppo.entropy_coef)
+    assert lines[-1]["ppo/entropy_coef"] == pytest.approx(config.ppo.entropy_coef_final)
+
+
+def test_constant_schedules_never_move(tmp_path):
+    config = _smoke_config(tmp_path)
+    lines = _metric_lines(train(config, progress=False))
+    assert {line["ppo/lr"] for line in lines} == {config.ppo.lr}
+    assert {line["ppo/entropy_coef"] for line in lines} == {config.ppo.entropy_coef}
+
+
+@pytest.fixture
+def restore_deterministic_settings():
+    """``train.deterministic`` flips process-global torch switches; undo them after the test."""
+    cudnn = torch.backends.cudnn
+    benchmark, deterministic = cudnn.benchmark, cudnn.deterministic
+    cublas = os.environ.get("CUBLAS_WORKSPACE_CONFIG")
+    yield
+    torch.use_deterministic_algorithms(False)
+    cudnn.benchmark, cudnn.deterministic = benchmark, deterministic
+    if cublas is None:
+        os.environ.pop("CUBLAS_WORKSPACE_CONFIG", None)
+    else:
+        os.environ["CUBLAS_WORKSPACE_CONFIG"] = cublas
+
+
+def test_deterministic_training_runs_with_the_default_architecture(
+    tmp_path, restore_deterministic_settings
+):
+    config = _smoke_config(tmp_path, "train.deterministic=true")
+    assert len(_metric_lines(train(config, progress=False))) == 4
+    assert torch.are_deterministic_algorithms_enabled()
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA device")
+@pytest.mark.parametrize("agent", ["cnn", "cnn-spatial", "resnet"])
+def test_deterministic_training_runs_on_cuda(tmp_path, restore_deterministic_settings, agent):
+    config = _smoke_config(
+        tmp_path, "train.device=cuda", "train.deterministic=true", f"agent.name={agent}"
+    )
+    assert len(_metric_lines(train(config, progress=False))) == 4

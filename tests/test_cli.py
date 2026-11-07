@@ -48,3 +48,31 @@ def test_config_errors_are_reported_without_a_traceback(tmp_path, capsys):
 def test_compare_without_runs_says_so(tmp_path, capsys):
     assert main(["compare", str(tmp_path)]) == 1
     assert "No run folders found" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("name", ["2", "off"])
+def test_name_flag_is_taken_as_text_not_parsed_as_yaml(tmp_path, name):
+    args = ["train", "--config", str(SMOKE), "--set", f"train.runs_dir={tmp_path.as_posix()}"]
+    assert main([*args, "--name", name, "--seed", "5"]) == 0
+    (run_dir,) = tmp_path.iterdir()
+    assert run_dir.name.endswith(f"_{name}_seed5")
+
+
+def test_agent_flag_is_taken_as_text_not_parsed_as_yaml(capsys):
+    assert main(["train", "--agent", "off"]) == 2
+    assert "unknown agent 'off'" in capsys.readouterr().err
+
+
+def test_set_still_parses_values_as_yaml(capsys):
+    assert main(["train", "--set", "train.name=2"]) == 2
+    assert "train.name must be str, got 2" in capsys.readouterr().err
+
+
+def test_bad_agent_kwargs_are_reported_without_a_traceback_or_run_folder(tmp_path, capsys):
+    args = ["train", "--config", str(SMOKE), "--set", f"train.runs_dir={tmp_path.as_posix()}"]
+    assert main([*args, "--set", "agent.kwargs={foo: 1}"]) == 2
+    err = capsys.readouterr().err
+    assert "snakeppo train: error: agent 'cnn'" in err
+    assert "'foo'" in err
+    assert "Traceback" not in err
+    assert list(tmp_path.iterdir()) == []

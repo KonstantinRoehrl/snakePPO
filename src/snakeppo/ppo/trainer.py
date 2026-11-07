@@ -82,7 +82,8 @@ def train(config: Config, *, progress: bool = True) -> Path:
     with MetricsLogger(run_dir) as logger:
         bar = tqdm(range(1, num_updates + 1), desc="Training", unit="update", disable=not progress)
         for update in bar:
-            fraction = (update - 1) / num_updates
+            # the first update runs at the start value, the last one exactly at the end value
+            fraction = (update - 1) / max(num_updates - 1, 1)
             lr = lr_at(ppo.lr_schedule, ppo.lr, fraction)
             entropy_coef = entropy_coef_at(
                 ppo.entropy_schedule, ppo.entropy_coef, ppo.entropy_coef_final, fraction

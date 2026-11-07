@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
@@ -18,6 +19,8 @@ class AgentSpec:
     builder: Callable[..., PolicyNetwork]
     requires_even_board: bool = False
 
+
+_SHARED_ARGUMENTS = ("board_size", "in_channels", "num_actions")
 
 REGISTRY: dict[str, AgentSpec] = {}
 
@@ -64,6 +67,18 @@ def build_agent(
         raise ValueError(f"unknown agent '{name}'; available: {', '.join(available_agents())}")
     if spec.requires_even_board and board_size % 2:
         raise ValueError(f"agent '{name}' needs an even env.board_size, got {board_size}")
+    accepted = [
+        parameter
+        for parameter in inspect.signature(spec.builder).parameters
+        if parameter not in _SHARED_ARGUMENTS
+    ]
+    unexpected = [key for key in kwargs if key not in accepted]
+    if unexpected:
+        raise ValueError(
+            f"agent '{name}' does not accept agent.kwargs "
+            f"{', '.join(repr(key) for key in unexpected)}; "
+            f"accepted: {', '.join(accepted) or 'none'}"
+        )
     return spec.builder(
         board_size=board_size, in_channels=in_channels, num_actions=num_actions, **kwargs
     )
