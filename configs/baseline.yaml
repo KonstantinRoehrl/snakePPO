@@ -1,0 +1,40 @@
+# Vanilla PPO baseline: every value below is the code default, stated explicitly.
+# Copy this file to start an experiment; partial files are fine too.
+env:
+  board_size: 16
+  num_envs: 64
+  starvation_steps: 512
+  seed: 42
+reward:
+  apple: 1.0
+  death: -3.0
+  approach: 0.02
+  retreat: 0.03
+agent:
+  name: cnn
+  kwargs: {}
+ppo:
+  rollout_steps: 256
+  update_epochs: 4
+  minibatch_size: 2048
+  gamma: 0.99
+  gae_lambda: 0.95
+  lr: 0.00025
+  clip_eps: 0.2
+  value_coef: 0.5
+  entropy_coef: 0.005
+  entropy_coef_final: 0.0005
+  max_grad_norm: 0.5
+  normalize_advantages: true
+  lr_schedule: constant
+  clip_value_loss: false
+  entropy_schedule: constant
+  target_kl: null
+train:
+  total_env_steps: 10000000
+  eval_interval: 10
+  eval_episodes: 64
+  device: auto
+  name: baseline
+  runs_dir: runs
+  deterministic: false

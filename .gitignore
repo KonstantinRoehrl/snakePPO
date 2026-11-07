@@ -1,5 +1,19 @@
 *.pyc
+__pycache__/
 
 logs/*
 models/*
 .vscode/*
+
+# uv
+.venv/
+
+# training output
+runs/
+
+# graphify's machine-local cache
+graphify-out/cache/
+
+# planning artifacts, never committed
+.devcycle/
+docs/superpowers/

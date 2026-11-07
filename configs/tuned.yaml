@@ -1,0 +1,12 @@
+# Baseline plus every C1 PPO switch turned on. Compare runs of this preset against
+# configs/baseline.yaml to measure the switches' combined effect; toggle one at a time
+# with --set to measure each in isolation.
+ppo:
+  lr_schedule: linear
+  clip_value_loss: true
+  entropy_coef: 0.01
+  entropy_coef_final: 0.001
+  entropy_schedule: linear
+  target_kl: 0.03
+train:
+  name: tuned
