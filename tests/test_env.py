@@ -1,3 +1,4 @@
+import pytest
 import torch
 
 from snakeppo.env import DOWN, LEFT, RIGHT, STRAIGHT, TURN_LEFT, TURN_RIGHT, UP, TorchSnakeEnv
@@ -125,3 +126,39 @@ def _food_after_resets(seed, resets=3):
 def test_same_seed_reproduces_food_and_different_seed_does_not():
     assert torch.equal(_food_after_resets(1), _food_after_resets(1))
     assert not torch.equal(_food_after_resets(1), _food_after_resets(2))
+
+
+def _random_actions(steps, num_envs, seed):
+    generator = torch.Generator().manual_seed(seed)
+    return torch.randint(0, 3, (steps, num_envs), generator=generator)
+
+
+def _trajectory(env, actions):
+    out = []
+    for step_actions in actions:
+        obs, reward, terminated, truncated, info = env.step(step_actions)
+        out.append((obs, reward, terminated, truncated, info["episode_score"]))
+    return out
+
+
+def test_state_dict_round_trip_continues_the_same_trajectory(tmp_path):
+    original = _env(num_envs=4, seed=3, starvation_steps=20)
+    _trajectory(original, _random_actions(60, 4, seed=0))
+    path = tmp_path / "env.pt"
+    torch.save(original.state_dict(), path)
+
+    restored = _env(num_envs=4, seed=99, starvation_steps=20)
+    restored.load_state_dict(torch.load(path, weights_only=True))
+    assert torch.equal(restored.observe(), original.observe())
+    later = _random_actions(200, 4, seed=1)
+    for a, b in zip(_trajectory(original, later), _trajectory(restored, later), strict=True):
+        assert all(torch.equal(x, y) for x, y in zip(a, b, strict=True))
+
+
+def test_load_state_dict_rejects_a_different_env_shape():
+    state = _env(num_envs=4).state_dict()
+    with pytest.raises(ValueError, match="num_envs or board_size differ"):
+        _env(num_envs=2).load_state_dict(state)
+    del state["generator"]
+    with pytest.raises(ValueError, match="missing generator"):
+        _env(num_envs=4).load_state_dict(state)

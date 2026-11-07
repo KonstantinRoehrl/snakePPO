@@ -7,7 +7,7 @@ episode's statistics.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 
 import torch
 
@@ -17,6 +17,19 @@ UP, RIGHT, DOWN, LEFT = range(4)
 STRAIGHT, TURN_LEFT, TURN_RIGHT = range(3)
 NUM_ACTIONS = 3
 NUM_CHANNELS = 4  # body, head, food, wall ring
+# Every attribute ``step`` and ``_reset_envs`` reassign; ``state_dict`` saves exactly these.
+STATE_TENSORS = (
+    "head",
+    "heading",
+    "body",
+    "body_positions",
+    "snake_len",
+    "food",
+    "score",
+    "steps_since_food",
+    "episode_length",
+    "episode_return",
+)
 
 
 class TorchSnakeEnv:
@@ -168,6 +181,27 @@ class TorchSnakeEnv:
         self.heading[env_index] = heading
         self.food[env_index] = torch.tensor(food, device=self.device)
         self._rebuild_body()
+
+    def state_dict(self) -> dict[str, torch.Tensor]:
+        """Everything ``step`` mutates, as CPU tensors, plus the food generator's state."""
+        state = {name: getattr(self, name).detach().cpu().clone() for name in STATE_TENSORS}
+        state["generator"] = self.generator.get_state()
+        return state
+
+    def load_state_dict(self, state: Mapping[str, torch.Tensor]) -> None:
+        """Restore a :meth:`state_dict` taken from an env with the same ``num_envs`` and board."""
+        missing = [name for name in (*STATE_TENSORS, "generator") if name not in state]
+        if missing:
+            raise ValueError(f"env state is missing {', '.join(missing)}")
+        for name in STATE_TENSORS:
+            current, saved = getattr(self, name), state[name]
+            if saved.shape != current.shape:
+                raise ValueError(
+                    f"env state '{name}' has shape {tuple(saved.shape)}, this env needs "
+                    f"{tuple(current.shape)} (num_envs or board_size differ)"
+                )
+            setattr(self, name, saved.to(device=self.device, dtype=current.dtype).clone())
+        self.generator.set_state(state["generator"])
 
     # ---------------------------------------------------------------- internals
     def _reset_envs(self, mask: torch.Tensor) -> None:
