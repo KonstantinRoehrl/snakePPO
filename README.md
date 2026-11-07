@@ -1,27 +1,35 @@
-# snakePPO environment
+# snakePPO
 
-This workspace includes an environment recipe and a helper script to create a conda environment named `snakePPO` with the latest compatible Python, NumPy, Pygame, and PyTorch.
+A research bench for training PPO agents that play Snake from a grid observation. Every
+learning-altering improvement is a config switch, and the defaults are the plain baseline, so
+experiments compare one change at a time.
 
-Quick create (recommended):
-
-```bash
-cd /Users/konstantin/Documents/Hobby_Programming/SnakePPO
-bash create_env.sh
-conda activate snakePPO
-```
-
-Alternative (manual) commands:
+## Quickstart
 
 ```bash
-# create with a recent Python (adjust version if needed)
-conda create -n snakePPO python=3.11 numpy pygame pip -y
-conda activate snakePPO
-# install PyTorch latest via pip (CPU/GPU selection handled by pip wheels)
-pip install --upgrade pip
-pip install torch torchvision torchaudio
+uv sync                                                  # CPU-only: uv sync --no-group cuda --group cpu
+uv run snakeppo train --config configs/smoke.yaml        # tiny run, finishes in seconds
+uv run snakeppo train --config configs/baseline.yaml     # a real run
+uv run snakeppo eval runs/<run> --render                 # watch the trained agent play
 ```
 
-Files added:
+## Commands
 
-- [environment.yml](environment.yml)
-- [create_env.sh](create_env.sh)
+- `uv run snakeppo train` — train an agent and write a run folder under `runs/`.
+- `uv run snakeppo eval <run>` — evaluate a run folder or checkpoint; `--render` opens a window.
+- `uv run snakeppo agents` — list the available architectures with their parameter counts.
+- `uv run snakeppo compare [runs/…]` — summarise finished runs as a table.
+
+Run `uv run snakeppo <command> --help` for every flag.
+
+## Verification
+
+```bash
+uv run ruff check . && uv run ruff format --check . && uv run pytest
+```
+
+## Documentation
+
+- [Architecture](docs/architecture.md) — module map and how the pieces fit.
+- [Experiments](docs/experiments.md) — run folders, the metrics schema and comparing runs.
+- [Extending](docs/extending.md) — adding architectures, switches and observation variants.
