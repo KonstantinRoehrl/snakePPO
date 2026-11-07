@@ -1,17 +1,24 @@
-"""Run folders: layout, ``run.json``, the ``metrics.jsonl`` contract and checkpoints.
+"""Run folders: layout, ``run.json``, the ``metrics.jsonl`` contract, status and checkpoints.
 
-Layout (schema version 1)::
+Layout (schema version 2)::
 
     <runs_dir>/<YYYY-MM-DD_HHMMSS>_<name>_seed<k>/
         run.json  config.yaml  metrics.jsonl  tb/  checkpoints/{best,last}.pt
+
+Readers accept schema-1 folders too; their status is inferred (see :func:`derive_status`).
 """
 
 from __future__ import annotations
 
 import json
+import math
+import os
+import statistics
 import subprocess
+import sys
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -21,13 +28,26 @@ import yaml
 from torch import nn
 from torch.utils.tensorboard import SummaryWriter
 
-SCHEMA_VERSION = 1
+from snakeppo.config import Config, load_config
+
+SCHEMA_VERSION = 2
 RUN_INFO_FILE = "run.json"
 CONFIG_FILE = "config.yaml"
 METRICS_FILE = "metrics.jsonl"
 TENSORBOARD_DIR = "tb"
 CHECKPOINT_DIR = "checkpoints"
 CHECKPOINT_NAMES = ("best", "last")
+
+# Stored in run.json by the trainer.
+WRITTEN_STATUSES = ("running", "finished", "interrupted", "failed")
+# What readers report: the stored ones plus the two derived ones.
+RUN_STATUSES = ("running", "stalled", "finished", "interrupted", "failed", "unknown")
+STALL_FLOOR_SECONDS = 60.0
+STALL_GAP_FACTOR = 5.0
+STALL_RECENT_UPDATES = 10
+
+_REPLACE_ATTEMPTS = 20
+_REPLACE_BACKOFF_SECONDS = 0.05
 
 
 def create_run_dir(runs_dir: str | Path, name: str, seed: int, now: datetime | None = None) -> Path:
@@ -50,8 +70,46 @@ def git_sha(cwd: str | Path | None = None) -> str | None:
     return result.stdout.strip() or None
 
 
+def total_updates(config: Config) -> int:
+    """Number of PPO updates a run of ``config`` loops to."""
+    batch = config.ppo.rollout_steps * config.env.num_envs
+    return math.ceil(config.train.total_env_steps / batch)
+
+
+# ------------------------------------------------------------------ atomic writes
+def replace_atomically(path: Path, write: Callable[[Path], None]) -> None:
+    """Write via ``write(temp)`` next to ``path``, then ``os.replace`` it into place.
+
+    On Windows ``os.replace`` fails while another process (the dashboard) has the target
+    open, so a short retry loop rides out those reads.
+    """
+    temp = path.with_name(f".{path.name}.tmp")
+    write(temp)
+    for attempt in range(_REPLACE_ATTEMPTS):
+        try:
+            os.replace(temp, path)
+            return
+        except PermissionError:
+            if sys.platform != "win32" or attempt == _REPLACE_ATTEMPTS - 1:
+                raise
+            time.sleep(_REPLACE_BACKOFF_SECONDS)
+
+
+def write_json_atomic(path: Path, data: Mapping[str, Any]) -> None:
+    text = json.dumps(data, indent=2) + "\n"
+    replace_atomically(path, lambda temp: temp.write_text(text, encoding="utf-8"))
+
+
+# ------------------------------------------------------------------ run.json
 def write_run_info(
-    run_dir: Path, *, name: str, agent: str, param_count: int, device: str
+    run_dir: Path,
+    *,
+    name: str,
+    agent: str,
+    param_count: int,
+    device: str,
+    total_updates: int,
+    group: str | None,
 ) -> dict[str, Any]:
     info = {
         "schema_version": SCHEMA_VERSION,
@@ -61,28 +119,61 @@ def write_run_info(
         "agent": agent,
         "param_count": param_count,
         "device": device,
+        "status": "running",
+        "total_updates": total_updates,
+        "group": group,
+        "resumed": [],
     }
-    (run_dir / RUN_INFO_FILE).write_text(json.dumps(info, indent=2) + "\n", encoding="utf-8")
+    write_json_atomic(run_dir / RUN_INFO_FILE, info)
     return info
 
 
+def read_run_info(run_dir: Path) -> dict[str, Any]:
+    return json.loads((run_dir / RUN_INFO_FILE).read_text(encoding="utf-8"))
+
+
+def update_run_info(run_dir: Path, **fields: Any) -> dict[str, Any]:
+    """Rewrite ``run.json`` with ``fields`` changed; ``status`` must be a stored status."""
+    status = fields.get("status")
+    if status is not None and status not in WRITTEN_STATUSES:
+        raise ValueError(f"status must be one of {', '.join(WRITTEN_STATUSES)}, got {status!r}")
+    info = read_run_info(run_dir) | fields
+    write_json_atomic(run_dir / RUN_INFO_FILE, info)
+    return info
+
+
+# ------------------------------------------------------------------ metrics.jsonl
 class MetricsLogger:
     """Appends one JSON object per PPO update and mirrors every key to TensorBoard.
 
     TensorBoard's x-axis is ``env_steps`` so runs with different rollout sizes overlay.
+    ``wall_time_offset`` continues a resumed run's clock; ``purge_step`` drops TensorBoard
+    events at or after that step left behind by the interrupted session.
     """
 
-    def __init__(self, run_dir: Path, tensorboard: bool = True) -> None:
+    def __init__(
+        self,
+        run_dir: Path,
+        tensorboard: bool = True,
+        *,
+        wall_time_offset: float = 0.0,
+        purge_step: int | None = None,
+    ) -> None:
         self._file = (run_dir / METRICS_FILE).open("a", encoding="utf-8")
-        self._writer = SummaryWriter(str(run_dir / TENSORBOARD_DIR)) if tensorboard else None
+        self._writer = (
+            SummaryWriter(str(run_dir / TENSORBOARD_DIR), purge_step=purge_step)
+            if tensorboard
+            else None
+        )
+        self._offset = wall_time_offset
         self._start = time.perf_counter()
 
+    def elapsed(self) -> float:
+        """Seconds of training so far, including the time before a resume."""
+        return self._offset + time.perf_counter() - self._start
+
     def log(self, update: int, env_steps: int, metrics: Mapping[str, float]) -> None:
-        record = {
-            "update": update,
-            "env_steps": env_steps,
-            "wall_time": round(time.perf_counter() - self._start, 3),
-        }
+        record = {"update": update, "env_steps": env_steps, "wall_time": round(self.elapsed(), 3)}
         record.update({key: float(value) for key, value in metrics.items()})
         self._file.write(json.dumps(record) + "\n")
         self._file.flush()
@@ -102,6 +193,142 @@ class MetricsLogger:
         self.close()
 
 
+def read_metrics(run_dir: Path) -> list[dict[str, Any]]:
+    """Every complete line of ``metrics.jsonl``; a partial last line is left out."""
+    return read_metrics_since(run_dir, 0).lines
+
+
+@dataclass(frozen=True)
+class MetricsChunk:
+    lines: list[dict[str, Any]]
+    offset: int  # byte offset just after the last complete line returned
+    reset: bool  # the caller's offset no longer fits the file; ``lines`` start from byte 0
+
+
+def read_metrics_since(run_dir: Path, offset: int) -> MetricsChunk:
+    """Complete lines after byte ``offset``; restarts from 0 when the file was rewritten.
+
+    A valid offset always sits just after a newline, so an offset past the end of the file or
+    one not preceded by a newline means a resume truncated the file: the chunk then starts
+    again from byte 0 with ``reset=True``.
+    """
+    if offset < 0:
+        raise ValueError(f"offset must be >= 0, got {offset}")
+    path = run_dir / METRICS_FILE
+    if not path.is_file():
+        return MetricsChunk([], 0, offset > 0)
+    with path.open("rb") as handle:
+        size = os.fstat(handle.fileno()).st_size
+        reset = offset > size
+        if not reset and offset > 0:
+            handle.seek(offset - 1)
+            reset = handle.read(1) != b"\n"
+        start = 0 if reset else offset
+        handle.seek(start)
+        data = handle.read(size - start)
+    complete = data[: data.rfind(b"\n") + 1]
+    lines = [json.loads(line) for line in complete.decode("utf-8").splitlines() if line.strip()]
+    return MetricsChunk(lines, start + len(complete), reset)
+
+
+def truncate_metrics(run_dir: Path, after_update: int) -> int:
+    """Drop every line with ``update > after_update`` (atomic rewrite); returns lines dropped."""
+    lines = read_metrics(run_dir)
+    kept = [line for line in lines if line["update"] <= after_update]
+    text = "".join(json.dumps(line) + "\n" for line in kept)
+    replace_atomically(run_dir / METRICS_FILE, lambda temp: temp.write_text(text, encoding="utf-8"))
+    return len(lines) - len(kept)
+
+
+# ------------------------------------------------------------------ status
+def seconds_per_update(metrics: Sequence[Mapping[str, Any]]) -> float | None:
+    """Median ``wall_time`` gap over the last updates; ``None`` before two updates."""
+    times = [line["wall_time"] for line in metrics[-STALL_RECENT_UPDATES:]]
+    gaps = [later - earlier for earlier, later in zip(times, times[1:], strict=False)]
+    return statistics.median(gaps) if gaps else None
+
+
+def stall_window(metrics: Sequence[Mapping[str, Any]]) -> float:
+    """Seconds without a metrics write after which a running run counts as stalled."""
+    typical = seconds_per_update(metrics) or 0.0
+    return max(STALL_FLOOR_SECONDS, STALL_GAP_FACTOR * typical)
+
+
+def last_write_time(run_dir: Path) -> float:
+    """mtime of ``metrics.jsonl``, or of ``run.json`` before the first update is logged."""
+    metrics = run_dir / METRICS_FILE
+    return (metrics if metrics.is_file() else run_dir / RUN_INFO_FILE).stat().st_mtime
+
+
+def derive_status(
+    info: Mapping[str, Any],
+    config: Config,
+    metrics: Sequence[Mapping[str, Any]],
+    last_write: float,
+    now: float,
+) -> str:
+    """One of :data:`RUN_STATUSES`.
+
+    Schema 2: the stored status, reported as ``stalled`` when it says ``running`` but nothing
+    was written for longer than :func:`stall_window`. Schema 1 stored no status: ``finished``
+    when the last update reached the run's total, otherwise ``unknown``.
+    """
+    if "status" not in info:
+        last = metrics[-1]["update"] if metrics else 0
+        return "finished" if last == total_updates(config) else "unknown"
+    status = info["status"]
+    if status == "running" and now - last_write > stall_window(metrics):
+        return "stalled"
+    return status
+
+
+@dataclass(frozen=True)
+class RunRecord:
+    """Everything readers need about one run folder, loaded at one moment."""
+
+    path: Path
+    info: dict[str, Any]
+    config: Config
+    metrics: list[dict[str, Any]]
+    status: str
+
+    @property
+    def id(self) -> str:
+        return self.path.name
+
+    @property
+    def group(self) -> str | None:
+        return self.info.get("group")
+
+    @property
+    def seed(self) -> int:
+        return self.config.env.seed
+
+    @property
+    def total_updates(self) -> int:
+        return self.info.get("total_updates") or total_updates(self.config)
+
+    @property
+    def update(self) -> int:
+        return self.metrics[-1]["update"] if self.metrics else 0
+
+    @property
+    def env_steps(self) -> int:
+        return self.metrics[-1]["env_steps"] if self.metrics else 0
+
+
+def load_run(run_dir: Path, now: float | None = None) -> RunRecord:
+    """Read one run folder; a key missing from an older ``config.yaml`` takes today's default."""
+    info = read_run_info(run_dir)
+    config = load_config(run_dir / CONFIG_FILE)
+    metrics = read_metrics(run_dir)
+    status = derive_status(
+        info, config, metrics, last_write_time(run_dir), time.time() if now is None else now
+    )
+    return RunRecord(path=run_dir, info=info, config=config, metrics=metrics, status=status)
+
+
+# ------------------------------------------------------------------ checkpoints
 def save_checkpoint(
     path: Path,
     *,
@@ -141,14 +368,7 @@ def resolve_checkpoint(target: str | Path, which: str = "best") -> tuple[Path, P
     return target, checkpoint
 
 
-def read_metrics(run_dir: Path) -> list[dict[str, Any]]:
-    path = run_dir / METRICS_FILE
-    if not path.is_file():
-        return []
-    lines = path.read_text(encoding="utf-8").splitlines()
-    return [json.loads(line) for line in lines if line.strip()]
-
-
+# ------------------------------------------------------------------ listing
 def find_runs(paths: list[Path]) -> list[Path]:
     """Each path is a run folder or a folder of run folders; returns run folders, sorted."""
     runs: set[Path] = set()
@@ -162,7 +382,7 @@ def find_runs(paths: list[Path]) -> list[Path]:
 
 def summarize_run(run_dir: Path) -> dict[str, Any]:
     """One comparison row: identity, progress and eval scores of a finished or running run."""
-    info = json.loads((run_dir / RUN_INFO_FILE).read_text(encoding="utf-8"))
+    info = read_run_info(run_dir)
     config = yaml.safe_load((run_dir / CONFIG_FILE).read_text(encoding="utf-8"))
     metrics = read_metrics(run_dir)
     evals = [m["eval/score_mean"] for m in metrics if "eval/score_mean" in m]

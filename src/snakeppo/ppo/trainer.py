@@ -26,6 +26,7 @@ from snakeppo.runs import (
     MetricsLogger,
     create_run_dir,
     save_checkpoint,
+    total_updates,
     write_run_info,
 )
 
@@ -59,6 +60,10 @@ def train(config: Config, *, progress: bool = True) -> Path:
     model = build_agent(config.agent.name, env_cfg.board_size, **config.agent.kwargs).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=ppo.lr, eps=1e-5)
 
+    steps, n = ppo.rollout_steps, env_cfg.num_envs
+    batch_size = steps * n
+    num_updates = total_updates(config)
+
     run_dir = create_run_dir(config.train.runs_dir, config.train.name, env_cfg.seed)
     save_config(config, run_dir / CONFIG_FILE)
     write_run_info(
@@ -67,13 +72,11 @@ def train(config: Config, *, progress: bool = True) -> Path:
         agent=config.agent.name,
         param_count=count_parameters(model),
         device=str(device),
+        total_updates=num_updates,
+        group=None,
     )
     config_dict = config_to_dict(config)
     print(f"Training '{config.agent.name}' on {device}; writing run folder {run_dir}")
-
-    steps, n = ppo.rollout_steps, env_cfg.num_envs
-    batch_size = steps * n
-    num_updates = math.ceil(config.train.total_env_steps / batch_size)
     buffer = RolloutBuffer(steps, n, env.obs_shape, device)
     obs = env.reset()
     env_steps, best_eval = 0, -math.inf
