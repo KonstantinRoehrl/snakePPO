@@ -4,7 +4,7 @@ import time
 import torch
 
 import config as cfg
-from agent import PPOAgent, SpatialAwarePPOAgent
+from agent import PPOAgent, DeepPPOAgent
 from environment import TorchSnakeEnv
 from visualizer import display_game_state
 
@@ -24,7 +24,7 @@ def evaluate_agent(model_path, num_envs=NUM_EVAL_ENVS, num_runs=1, sleep_time=SL
     """
     # Load environment and agent
     env = TorchSnakeEnv(size=cfg.GAME_SIZE, num_envs=num_envs, device=cfg.DEVICE)
-    agent = SpatialAwarePPOAgent().to(cfg.DEVICE)
+    agent = DeepPPOAgent().to(cfg.DEVICE)
     
     # Load trained weights
     if os.path.exists(model_path ):
@@ -135,7 +135,7 @@ if __name__ == "__main__":
     parser.add_argument(
         '--model', 
         type=str, 
-        default=os.path.join(cfg.MODEL_DIR, "SpatialAwarePPOAgent/best_model.pt"),
+        default=os.path.join(cfg.MODEL_DIR, "DeepPPOAgent/best_model.pt"),
         help='Path to model checkpoint (default: models/best_model.pt)'
     )
     parser.add_argument(

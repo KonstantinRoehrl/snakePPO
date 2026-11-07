@@ -8,8 +8,8 @@ import config as cfg
 class Reward(enum.Enum):
     EAT_APPLE = 1.
     DIE = -3.
-    PROXIMITY_REWARD = 0.01
-    PROXIMITY_DISCOUNT = 0.015
+    PROXIMITY_REWARD = 0.02
+    PROXIMITY_DISCOUNT = 0.03
 
 
 class TorchSnakeEnv:

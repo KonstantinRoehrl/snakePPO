@@ -1,14 +1,14 @@
 name: snakePPO
 channels:
   - pytorch
+  - nvidia
   - conda-forge
   - defaults
+
 dependencies:
-  - python>=3.11
+  - python=3.11
   - numpy
   - pygame
+  - tensorboard
+  - tqdm
   - pip
-  - pip:
-    - torch
-    - torchvision
-    - torchaudio

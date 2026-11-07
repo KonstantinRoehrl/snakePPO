@@ -41,9 +41,11 @@ os.makedirs(model_dir, exist_ok=True)
 os.makedirs(log_dir, exist_ok=True)
 
 writer = SummaryWriter(log_dir)
+print(torch.cuda.get_device_name(0) if torch.cuda.is_available() else "No GPU")
 
 print(f"{'='*60}")
 print(f"Training Configuration:")
+print(f"  Device: {cfg.DEVICE}")
 print(f"  Agent: {agent_name}")
 print(f"  Epochs: {cfg.EPOCHS}")
 print(f"  Model Directory: {model_dir}")
@@ -157,6 +159,9 @@ for epoch in range(cfg.EPOCHS):
     # Rollout Collection
     # ==========================
     actual_steps = 0
+    last_scores = env.score.clone()
+    steps_since_progress = 0    
+
     for t in tqdm(range(cfg.ROLLOUT_STEPS), desc="Gathering rollouts"):
         with torch.no_grad():
             actions, logp, values, dist = agent.sample_action(rotated_obs)
@@ -191,9 +196,24 @@ for epoch in range(cfg.EPOCHS):
         rotated_obs = next_rotated_obs
         actual_steps = t + 1
 
+
         # Stop rollout early if all envs are done
         if dones.all():
             print(f"Stopping rollout early at step {t+1} — all envs finished.")
+            break
+        
+        # Check if any score has changed (apple eaten)
+        current_scores = env.score
+        if (current_scores != last_scores).any():
+            # Progress made, reset counter
+            steps_since_progress = 0
+            last_scores = current_scores.clone()
+        else:
+            steps_since_progress += 1
+
+        # Stop if no progress for TRAIN_MAX_STEPS_WITHOUT_PROGRESS
+        if steps_since_progress >= cfg.TRAIN_MAX_STEPS_WITHOUT_PROGRESS:
+            print(f"Stopping rollout early at step {t+1} — No apple eaten for {cfg.TRAIN_MAX_STEPS_WITHOUT_PROGRESS} steps")
             break
 
     T = actual_steps
