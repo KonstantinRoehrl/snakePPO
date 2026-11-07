@@ -1,0 +1,68 @@
+[project]
+name = "snakeppo"
+version = "0.1.0"
+description = "A PPO research bench for Snake played from a grid observation."
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+  "numpy>=2",
+  "pygame>=2.6",
+  "pyyaml>=6",
+  "tensorboard>=2.17",
+  "tqdm>=4.66",
+]
+
+[project.scripts]
+snakeppo = "snakeppo.cli:main"
+
+[dependency-groups]
+dev = ["pytest>=8", "ruff>=0.8"]
+# torch sits in two mutually exclusive groups so one lock file serves CUDA machines (default)
+# and CPU-only CI (`uv sync --no-group cuda --group cpu`). macOS always resolves from PyPI.
+cuda = ["torch>=2.14"]
+cpu = ["torch>=2.14"]
+
+[tool.uv]
+default-groups = ["dev", "cuda"]
+conflicts = [[{ group = "cpu" }, { group = "cuda" }]]
+
+[tool.uv.sources]
+torch = [
+  { index = "pytorch-cu130", group = "cuda", marker = "sys_platform != 'darwin'" },
+  { index = "pytorch-cpu", group = "cpu", marker = "sys_platform != 'darwin'" },
+]
+
+[[tool.uv.index]]
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[build-system]
+requires = ["uv_build>=0.9,<0.14"]
+build-backend = "uv_build"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+# pre-C1 scripts kept for reference until Task 10 deletes them
+extend-exclude = [
+  "src/agent.py",
+  "src/config.py",
+  "src/environment.py",
+  "src/eval.py",
+  "src/train.py",
+  "src/visualizer.py",
+]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# pygame's font module imports the deprecated pkg_resources API
+filterwarnings = ["ignore:pkg_resources is deprecated:UserWarning"]
