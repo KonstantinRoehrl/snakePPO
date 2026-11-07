@@ -26,18 +26,15 @@ def _parser() -> argparse.ArgumentParser:
     commands = parser.add_subparsers(dest="command", required=True)
 
     train = commands.add_parser("train", help="train an agent and write a run folder")
-    train.add_argument("--config", type=Path, help="YAML experiment file (partial is fine)")
-    train.add_argument("--agent", help="architecture name; see 'snakeppo agents'")
-    train.add_argument(
-        "--set",
-        dest="overrides",
-        action="append",
-        default=[],
-        metavar="SECTION.KEY=VALUE",
-        help="override one config value; repeatable",
-    )
-    train.add_argument("--name", help="run name used in the run folder name")
+    _experiment_options(train)
     train.add_argument("--seed", type=int, help="seed for weights, environments and sampling")
+    train.add_argument("--group", help="seed-group id recorded in run.json (sweeps set it)")
+    train.add_argument(
+        "--resume",
+        type=Path,
+        metavar="RUN",
+        help="continue an interrupted run folder exactly; takes no other option",
+    )
 
     ev = commands.add_parser("eval", help="evaluate a trained run or checkpoint")
     ev.add_argument("target", type=Path, help="run folder or .pt checkpoint file")
@@ -57,18 +54,59 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _train(args: argparse.Namespace) -> int:
-    from snakeppo.ppo.trainer import train
+def _experiment_options(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--config", type=Path, help="YAML experiment file (partial is fine)")
+    parser.add_argument("--agent", help="architecture name; see 'snakeppo agents'")
+    parser.add_argument(
+        "--set",
+        dest="overrides",
+        action="append",
+        default=[],
+        metavar="SECTION.KEY=VALUE",
+        help="override one config value; repeatable",
+    )
+    parser.add_argument("--name", help="run name used in the run folder name")
 
-    overrides = list(args.overrides)
-    if args.seed is not None:
-        overrides.append(f"env.seed={args.seed}")
+
+def _experiment_config(args: argparse.Namespace, overrides: Sequence[str]) -> Config:
     config = load_config(args.config, overrides)
     # Applied after parsing so names like "2" or "off" stay text instead of becoming YAML values.
     if args.agent:
         config = validate(replace(config, agent=replace(config.agent, name=args.agent)))
     if args.name:
         config = validate(replace(config, train=replace(config.train, name=args.name)))
+    return config
+
+
+def _train(args: argparse.Namespace) -> int:
+    from snakeppo.ppo.trainer import resume, train
+
+    if args.resume is not None:
+        given = [
+            flag
+            for flag, value in (
+                ("--config", args.config),
+                ("--set", args.overrides),
+                ("--agent", args.agent),
+                ("--name", args.name),
+                ("--seed", args.seed),
+                ("--group", args.group),
+            )
+            if value not in (None, [])
+        ]
+        if given:
+            raise ValueError(
+                f"--resume continues a run exactly and cannot be combined with {', '.join(given)}"
+            )
+        resume(args.resume)
+        return 0
+
+    overrides = list(args.overrides)
+    if args.seed is not None:
+        overrides.append(f"env.seed={args.seed}")
+    config = _experiment_config(args, overrides)
+    if args.group:
+        config = validate(replace(config, train=replace(config.train, group=args.group)))
     train(config)
     return 0
 
@@ -181,6 +219,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     except (ConfigError, ValueError, FileNotFoundError) as error:
         print(f"snakeppo {args.command}: error: {error}", file=sys.stderr)
         return 2
+    except KeyboardInterrupt:
+        print(f"snakeppo {args.command}: interrupted", file=sys.stderr)
+        return 130
 
 
 if __name__ == "__main__":

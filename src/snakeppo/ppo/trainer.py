@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 import time
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 
 import torch
@@ -17,9 +18,10 @@ from snakeppo.builders import (
     capture_rng_state,
     make_env,
     resolve_device,
+    restore_rng_state,
     seed_everything,
 )
-from snakeppo.config import Config, config_to_dict, save_config, validate
+from snakeppo.config import Config, config_from_dict, config_to_dict, save_config, validate
 from snakeppo.env import TorchSnakeEnv
 from snakeppo.evaluation import evaluate
 from snakeppo.ppo.functional import (
@@ -32,10 +34,17 @@ from snakeppo.ppo.functional import (
 from snakeppo.runs import (
     CHECKPOINT_DIR,
     CONFIG_FILE,
+    RUN_INFO_FILE,
+    SCHEMA_VERSION,
     MetricsLogger,
     create_run_dir,
+    last_write_time,
+    load_checkpoint,
+    load_run,
     save_checkpoint,
+    stall_window,
     total_updates,
+    truncate_metrics,
     update_run_info,
     write_run_info,
 )
@@ -95,6 +104,78 @@ def train(config: Config, *, progress: bool = True) -> Path:
     obs = env.reset()
     session = _Session(run_dir, config, device, env, model, optimizer)
     return _run(session, obs, Progress(), progress=progress)
+
+
+class ResumeError(ValueError):
+    """A run folder that cannot be continued exactly; the message says why."""
+
+
+def resume(run_dir: str | Path, *, progress: bool = True) -> Path:
+    """Continue an interrupted, failed or stalled run in place from ``checkpoints/last.pt``.
+
+    The continuation is exact on CPU: the same metrics an uninterrupted run would have logged,
+    apart from ``wall_time`` and ``train/fps``.
+    """
+    run_dir = Path(run_dir)
+    if not (run_dir / RUN_INFO_FILE).is_file():
+        raise FileNotFoundError(f"{run_dir} is not a run folder (no {RUN_INFO_FILE})")
+    record = load_run(run_dir)
+    if record.info.get("schema_version", 1) < SCHEMA_VERSION:
+        raise ResumeError(f"{run_dir} was written before resume support; cannot be resumed exactly")
+    if record.status == "finished":
+        raise ResumeError(f"{run_dir} already finished all {record.total_updates} updates")
+    if record.status == "running":
+        age = time.time() - last_write_time(run_dir)
+        raise ResumeError(
+            f"{run_dir} is still being trained: its metrics were written {age:.0f} s ago. If no "
+            f"process is training it, retry once it shows as stalled "
+            f"({stall_window(record.metrics):.0f} s without a write)"
+        )
+    last = run_dir / CHECKPOINT_DIR / "last.pt"
+    if not last.is_file():
+        raise ResumeError(f"{run_dir} has no {CHECKPOINT_DIR}/last.pt to resume from")
+    checkpoint = load_checkpoint(last)
+    if checkpoint.get("schema_version") != SCHEMA_VERSION:
+        raise ResumeError(f"{last} was written before resume support; cannot be resumed exactly")
+
+    config = config_from_dict(checkpoint["config"])
+    device = resolve_device(config.train.device)
+    trained_on = torch.device(record.info["device"]).type
+    if device.type != trained_on:
+        raise ResumeError(
+            f"{run_dir} trained on {trained_on} but would resume on {device.type}; "
+            f"its {trained_on} random state cannot be restored there"
+        )
+    if device.type != "cpu" and not config.train.deterministic:
+        print(
+            "Note: exact continuation is only guaranteed on CPU or with train.deterministic: true"
+        )
+
+    seed_everything(config.env.seed, config.train.deterministic)
+    env_cfg = config.env
+    env = make_env(
+        env_cfg, config.reward, num_envs=env_cfg.num_envs, device=device, seed=env_cfg.seed
+    )
+    env.load_state_dict(checkpoint["env"])
+    model = build_agent(config.agent.name, env_cfg.board_size, **config.agent.kwargs).to(device)
+    model.load_state_dict(checkpoint["model"])
+    optimizer = torch.optim.Adam(model.parameters(), lr=config.ppo.lr, eps=1e-5)
+    optimizer.load_state_dict(checkpoint["optimizer"])
+
+    update, env_steps = checkpoint["update"], checkpoint["env_steps"]
+    dropped = truncate_metrics(run_dir, after_update=update)
+    stamp = datetime.now().astimezone().isoformat(timespec="seconds")
+    update_run_info(run_dir, status="running", resumed=[*record.info["resumed"], stamp])
+    print(
+        f"Resuming {run_dir} after update {update} of {record.total_updates} on {device} "
+        f"(dropped {dropped} metrics lines logged after that checkpoint)"
+    )
+    # last: building the model above drew from the global RNG
+    restore_rng_state(checkpoint["rng"])
+    start = Progress(update, env_steps, checkpoint["best_eval"], checkpoint["wall_time"])
+    session = _Session(run_dir, config, device, env, model, optimizer)
+    first_new_step = env_steps + config.ppo.rollout_steps * env_cfg.num_envs
+    return _run(session, env.observe(), start, progress=progress, purge_step=first_new_step)
 
 
 @dataclass(frozen=True)
