@@ -6,7 +6,8 @@ Layout (schema version 4)::
         run.json  config.yaml  metrics.jsonl  tb/  checkpoints/{best,last}.pt
 
 Schema 4 adds the ``observation`` record (channel names, spatial size, view) to ``run.json`` and
-every checkpoint. Readers accept schema-1 to 3 folders too; a schema-1 status is inferred (see
+every checkpoint, and a recurrent run's hidden state (``policy_state``) to its checkpoints.
+Readers accept schema-1 to 3 folders too; a schema-1 status is inferred (see
 :func:`derive_status`), and a folder without an ``observation`` record trained on the default
 observation. Schema 2, 3 and 4 runs can be resumed (:data:`RESUMABLE_SCHEMAS`).
 """
@@ -343,11 +344,13 @@ def save_checkpoint(
     env: Mapping[str, Any],
     observation: Mapping[str, Any],
     curriculum: Mapping[str, Any] | None = None,
+    policy_state: torch.Tensor | None = None,
 ) -> None:
     """Write a checkpoint atomically, so a Ctrl+C mid-save never leaves half a file.
 
     ``observation`` is the run's observation record, checked before the weights are loaded;
-    ``curriculum`` is stored only when given (a run with ``curriculum.grow`` on).
+    ``curriculum`` is stored only when given (a run with ``curriculum.grow`` on), and so is
+    ``policy_state``: a recurrent run's hidden state (N, K, H) on CPU, the next rollout's start.
     """
     state = {
         "schema_version": SCHEMA_VERSION,
@@ -364,6 +367,8 @@ def save_checkpoint(
     }
     if curriculum is not None:
         state["curriculum"] = dict(curriculum)
+    if policy_state is not None:
+        state["policy_state"] = policy_state
     replace_atomically(path, lambda temp: torch.save(state, temp))
 
 

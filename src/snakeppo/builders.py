@@ -17,7 +17,7 @@ from typing import Any
 import numpy as np
 import torch
 
-from snakeppo.agents import REGISTRY, build_agent
+from snakeppo.agents import REGISTRY, RecurrentPolicy, build_agent
 from snakeppo.agents.networks import PolicyNetwork
 from snakeppo.config import Config, EnvConfig, ObservationConfig, RewardConfig
 from snakeppo.env import TorchSnakeEnv
@@ -138,10 +138,18 @@ def observation_record(config: Config) -> dict[str, Any]:
     return ObservationSpec.from_config(config.observation).record(config.env.board_size)
 
 
+def recurrent_minibatches(config: Config) -> int:
+    """How many groups of whole envs a recurrent update splits its rollout into."""
+    batch = config.ppo.rollout_steps * config.env.num_envs
+    return max(1, batch // config.ppo.minibatch_size)
+
+
 def make_policy(config: Config) -> PolicyNetwork:
     """The run's network, on CPU, sized from its observation (input side and channel count).
 
     With the default observation this is exactly ``build_agent(name, env.board_size, **kwargs)``.
+    A recurrent network trains on groups of whole envs, so its group count must divide
+    ``env.num_envs``.
     """
     spec = ObservationSpec.from_config(config.observation)
     name, size = config.agent.name, spec.size(config.env.board_size)
@@ -151,7 +159,15 @@ def make_policy(config: Config) -> PolicyNetwork:
             f"agent '{name}' needs an even input size, but observation.view: local feeds it "
             f"observation.view_size ({spec.view_size}) cells a side"
         )
-    return build_agent(name, size, in_channels=len(spec.channels), **config.agent.kwargs)
+    model = build_agent(name, size, in_channels=len(spec.channels), **config.agent.kwargs)
+    groups, num_envs = recurrent_minibatches(config), config.env.num_envs
+    if isinstance(model, RecurrentPolicy) and num_envs % groups:
+        raise ValueError(
+            f"agent '{name}' trains on whole envs: ppo.rollout_steps * env.num_envs // "
+            f"ppo.minibatch_size gives {groups} minibatches, which must divide "
+            f"env.num_envs ({num_envs})"
+        )
+    return model
 
 
 def load_policy(checkpoint: Mapping[str, Any], config: Config, where: Path) -> PolicyNetwork:

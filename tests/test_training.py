@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 import torch
 
-from snakeppo.agents import build_agent
+from snakeppo.agents import available_agents, build_agent
 from snakeppo.builders import make_policy, observation_record
 from snakeppo.config import (
     REWARD_STRATEGIES,
@@ -86,6 +86,7 @@ def test_finished_run_records_schema_4_run_info_and_checkpoints(tmp_path):
     assert load_checkpoint(run_dir / "checkpoints" / "best.pt")["observation"] == SMOKE_RECORD
     assert {"best_eval", "wall_time", "rng", "env"} <= last.keys()
     assert "curriculum" not in last  # only runs with curriculum.grow on store it
+    assert "policy_state" not in last  # only recurrent runs store it
     assert last["best_eval"] == max(
         line["eval/score_mean"] for line in _metric_lines(run_dir) if "eval/score_mean" in line
     )
@@ -222,12 +223,16 @@ def test_deterministic_training_runs_with_the_default_architecture(
     assert torch.are_deterministic_algorithms_enabled()
 
 
+# every registered architecture, plus the recurrent one with its other cell
+CUDA_AGENTS = {name: (f"agent.name={name}",) for name in available_agents()} | {
+    "recurrent-lstm": ("agent.name=recurrent", "agent.kwargs={cell: lstm}")
+}
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a CUDA device")
-@pytest.mark.parametrize("agent", ["cnn", "cnn-spatial", "resnet"])
+@pytest.mark.parametrize("agent", CUDA_AGENTS.values(), ids=CUDA_AGENTS.keys())
 def test_deterministic_training_runs_on_cuda(tmp_path, restore_deterministic_settings, agent):
-    config = _smoke_config(
-        tmp_path, "train.device=cuda", "train.deterministic=true", f"agent.name={agent}"
-    )
+    config = _smoke_config(tmp_path, "train.device=cuda", "train.deterministic=true", *agent)
     assert len(_metric_lines(train(config, progress=False))) == 4
 
 
