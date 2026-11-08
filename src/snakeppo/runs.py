@@ -11,7 +11,6 @@ Readers accept schema-1 folders too; their status is inferred (see :func:`derive
 from __future__ import annotations
 
 import json
-import math
 import os
 import statistics
 import subprocess
@@ -28,7 +27,7 @@ import yaml
 from torch import nn
 from torch.utils.tensorboard import SummaryWriter
 
-from snakeppo.config import Config, load_config
+from snakeppo.config import Config, load_config, total_updates
 
 SCHEMA_VERSION = 2
 RUN_INFO_FILE = "run.json"
@@ -68,12 +67,6 @@ def git_sha(cwd: str | Path | None = None) -> str | None:
     except (OSError, subprocess.CalledProcessError):
         return None
     return result.stdout.strip() or None
-
-
-def total_updates(config: Config) -> int:
-    """Number of PPO updates a run of ``config`` loops to."""
-    batch = config.ppo.rollout_steps * config.env.num_envs
-    return math.ceil(config.train.total_env_steps / batch)
 
 
 # ------------------------------------------------------------------ atomic writes
