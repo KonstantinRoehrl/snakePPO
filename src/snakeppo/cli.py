@@ -1,4 +1,4 @@
-"""``snakeppo`` command line: train, eval, agents, compare, results, serve."""
+"""``snakeppo`` command line: train, eval, agents, compare, sweep, results, serve."""
 
 from __future__ import annotations
 
@@ -60,6 +60,13 @@ def _parser() -> argparse.ArgumentParser:
     compare = commands.add_parser("compare", help="summarise runs as a table")
     compare.add_argument("paths", nargs="*", type=Path, default=[Path("runs")])
 
+    sweep = commands.add_parser("sweep", help="train one run per seed as one seed group")
+    sweep.add_argument(
+        "--seeds", required=True, type=_seed_list, help="comma-separated seeds, e.g. 1,2,3"
+    )
+    _experiment_options(sweep)
+    sweep.add_argument("--jobs", type=int, default=1, help="seeds trained at once (default 1)")
+
     results = commands.add_parser(
         "results", help="judge seed groups against their baseline group across seeds"
     )
@@ -96,6 +103,15 @@ def _experiment_config(args: argparse.Namespace, overrides: Sequence[str]) -> Co
     if args.name:
         config = validate(replace(config, train=replace(config.train, name=args.name)))
     return config
+
+
+def _seed_list(text: str) -> list[int]:
+    try:
+        return [int(part) for part in text.split(",") if part.strip()]
+    except ValueError as error:
+        raise argparse.ArgumentTypeError(
+            f"expected comma-separated integers, got {text!r}"
+        ) from error
 
 
 def _train(args: argparse.Namespace) -> int:
@@ -231,6 +247,33 @@ def _compare(args: argparse.Namespace) -> int:
     return 0
 
 
+def _sweep(args: argparse.Namespace) -> int:
+    from snakeppo.sweep import format_outcomes, group_id, run_sweep
+
+    # resolve the config exactly as each child will, so a bad option fails once, up front
+    config = _experiment_config(args, args.overrides)
+    if config.agent.name not in REGISTRY:
+        raise ValueError(f"unknown agent '{config.agent.name}'; see 'snakeppo agents'")
+    train_args = [] if args.config is None else ["--config", str(args.config)]
+    for override in args.overrides:
+        train_args += ["--set", override]
+    for flag, value in (("--agent", args.agent), ("--name", args.name)):
+        if value:
+            train_args += [flag, value]
+    group = group_id(config.train.name)
+    seeds = ", ".join(map(str, args.seeds))
+    print(f"Sweep {group}: seeds {seeds}, {args.jobs} at a time")
+    outcomes = run_sweep(
+        args.seeds,
+        train_args,
+        runs_dir=Path(config.train.runs_dir),
+        group=group,
+        jobs=args.jobs,
+    )
+    print(format_outcomes(group, outcomes))
+    return 0 if all(outcome.returncode == 0 for outcome in outcomes) else 1
+
+
 def _results(args: argparse.Namespace) -> int:
     runs = find_runs(args.paths)
     if not runs:
@@ -261,6 +304,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "eval": _eval,
         "agents": _agents,
         "compare": _compare,
+        "sweep": _sweep,
         "results": _results,
         "serve": _serve,
     }
