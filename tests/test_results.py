@@ -16,6 +16,7 @@ from snakeppo.results import (
     paired_bootstrap,
     results_table,
     run_score,
+    switch_unit,
     switches,
     verdict,
 )
@@ -155,7 +156,13 @@ def test_forced_baseline_is_every_row_s_reference(tmp_path):
             lambda p: _group(
                 p, "g", {1: 1.0, 2: 1.0, 3: 1.0}, "ppo.target_kl=0.02", "ppo.clip_value_loss=true"
             ),
-            "2 learning keys differ from the reference (at most 1)",
+            "2 learning switches differ from the reference (at most 1)",
+        ),
+        (
+            lambda p: _group(
+                p, "g", {1: 1.0, 2: 1.0, 3: 1.0}, "reward.strategy=hunger", "ppo.lr_schedule=linear"
+            ),
+            "2 learning switches differ from the reference (at most 1)",
         ),
     ],
 )
@@ -216,3 +223,41 @@ def test_formats_render_every_row(tmp_path):
     assert rows[0]["train.total_env_steps"] == "10000000"
     with pytest.raises(ValueError, match="format must be one of"):
         format_results(table, "html")
+
+
+def test_a_selector_and_its_own_keys_count_as_one_switch(tmp_path):
+    runs = [
+        *_group(tmp_path, "base", {1: 2.0, 2: 3.0, 3: 2.5}),
+        *_group(
+            tmp_path,
+            "hunger",
+            {1: 3.0, 2: 4.0, 3: 3.5},
+            "reward.strategy=hunger",
+            "reward.hunger_penalty=0.05",
+            "reward.timeout_penalty=2",
+        ),
+        *_group(
+            tmp_path,
+            "grow",
+            {1: 2.0, 2: 3.0, 3: 2.5},
+            "curriculum.grow=board",
+            "curriculum.max_updates=50",
+        ),
+    ]
+    table = results_table(runs)
+    hunger = _row(table, "hunger")
+    assert hunger.verdict == "better" and len(hunger.differences) == 3
+    grow = _row(table, "grow")
+    assert grow.verdict == "inconclusive"
+    assert grow.differences == {
+        "curriculum.grow": ("off", "board"),
+        "curriculum.max_updates": (100, 50),
+    }
+
+
+def test_switch_units_fold_only_keys_a_selector_owns():
+    assert switch_unit("reward.potential_scale") == "reward.strategy"
+    assert switch_unit("reward.strategy") == "reward.strategy"
+    assert switch_unit("curriculum.promote_window") == "curriculum.grow"
+    for shared in ("reward.apple", "reward.approach", "ppo.gamma", "ppo.target_kl"):
+        assert switch_unit(shared) == shared
