@@ -13,7 +13,7 @@ import torch
 
 from snakeppo.agents import REGISTRY, available_agents, build_agent, count_parameters
 from snakeppo.agents.networks import PolicyNetwork
-from snakeppo.builders import EVAL_SEED_OFFSET, make_play_env, resolve_device
+from snakeppo.builders import EVAL_SEED_OFFSET, load_policy, make_play_env, resolve_device
 from snakeppo.config import Config, ConfigError, config_from_dict, load_config, validate
 from snakeppo.dashboard.server import DEFAULT_PORT
 from snakeppo.evaluation import evaluate
@@ -155,8 +155,7 @@ def _load_model(args: argparse.Namespace) -> tuple[PolicyNetwork, Config, Path, 
     device = resolve_device(args.device)
     checkpoint = load_checkpoint(checkpoint_path, map_location=device)
     config = config_from_dict(checkpoint["config"])
-    model = build_agent(config.agent.name, config.env.board_size, **config.agent.kwargs)
-    model.load_state_dict(checkpoint["model"])
+    model = load_policy(checkpoint, config, checkpoint_path)
     return model.to(device).eval(), config, checkpoint_path, device
 
 
@@ -169,6 +168,7 @@ def _eval(args: argparse.Namespace) -> int:
     stats = evaluate(
         model,
         config.env,
+        config.observation,
         episodes=episodes,
         device=device,
         seed=config.env.seed + EVAL_SEED_OFFSET,
@@ -197,6 +197,7 @@ def _watch(
 
     env = make_play_env(
         config.env,
+        config.observation,
         num_envs=max(1, min(args.envs, 4)),
         device=device,
         seed=config.env.seed + EVAL_SEED_OFFSET,
@@ -205,7 +206,7 @@ def _watch(
     finished = 0
     print("Close the window to stop.")
     with Viewer(config.env.board_size, env.num_envs) as viewer, torch.no_grad():
-        while viewer.draw(env.render_grid(), env.score.tolist()):
+        while viewer.draw(env.render_grid(), env.score.tolist(), env.render_body_order()):
             actions, _, _ = model.act(obs, greedy=greedy)
             obs, _, _, _, info = env.step(actions)
             for score in info["episode_score"][info["done"]].tolist():

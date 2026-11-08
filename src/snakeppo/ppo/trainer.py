@@ -11,12 +11,15 @@ from pathlib import Path
 import torch
 from tqdm import tqdm
 
-from snakeppo.agents import build_agent, count_parameters
+from snakeppo.agents import count_parameters
 from snakeppo.agents.networks import PolicyNetwork
 from snakeppo.builders import (
     EVAL_SEED_OFFSET,
     capture_rng_state,
+    load_policy,
     make_env,
+    make_policy,
+    observation_record,
     resolve_device,
     restore_rng_state,
     seed_everything,
@@ -59,13 +62,22 @@ from snakeppo.runs import (
 
 
 class RolloutBuffer:
-    """Preallocated (T, N) storage; observations are kept as uint8 and widened on read."""
+    """Preallocated (T, N) storage; observations are stored as ``obs_dtype`` and widened on read.
+
+    ``uint8`` is exact only for an observation whose every value is 0 or 1 (the default one);
+    the trainer passes ``float32`` for any other, so fractions are never truncated.
+    """
 
     def __init__(
-        self, steps: int, num_envs: int, obs_shape: tuple[int, ...], device: torch.device
+        self,
+        steps: int,
+        num_envs: int,
+        obs_shape: tuple[int, ...],
+        device: torch.device,
+        obs_dtype: torch.dtype = torch.uint8,
     ) -> None:
         shape = (steps, num_envs)
-        self.obs = torch.zeros((*shape, *obs_shape), dtype=torch.uint8, device=device)
+        self.obs = torch.zeros((*shape, *obs_shape), dtype=obs_dtype, device=device)
         self.actions = torch.zeros(shape, dtype=torch.long, device=device)
         self.log_probs = torch.zeros(shape, device=device)
         self.values = torch.zeros(shape, device=device)
@@ -93,7 +105,7 @@ def train(config: Config, *, progress: bool = True) -> Path:
     env = _make_train_env(config, device)
     curriculum = _make_curriculum(config, env)
     env_cfg = config.env
-    model = build_agent(config.agent.name, env_cfg.board_size, **config.agent.kwargs).to(device)
+    model = make_policy(config).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=config.ppo.lr, eps=1e-5)
 
     run_dir = create_run_dir(config.train.runs_dir, config.train.name, env_cfg.seed)
@@ -106,6 +118,7 @@ def train(config: Config, *, progress: bool = True) -> Path:
         device=str(device),
         total_updates=total_updates(config),
         group=config.train.group,
+        observation=observation_record(config),
     )
     print(f"Training '{config.agent.name}' on {device}; writing run folder {run_dir}")
     obs = env.reset()
@@ -118,6 +131,7 @@ def _make_train_env(config: Config, device: torch.device) -> TorchSnakeEnv:
     return make_env(
         env_cfg,
         config.reward,
+        config.observation,
         num_envs=env_cfg.num_envs,
         device=device,
         seed=env_cfg.seed,
@@ -152,7 +166,9 @@ def resume(run_dir: str | Path, *, progress: bool = True) -> Path:
     """Continue an interrupted, failed or stalled run in place from ``checkpoints/last.pt``.
 
     The continuation is exact on CPU: the same metrics an uninterrupted run would have logged,
-    apart from ``wall_time`` and ``train/fps``. A schema-2 run continues as schema 3.
+    apart from ``wall_time`` and ``train/fps``. A schema-2 or 3 run continues as schema 4: its
+    config has no observation section and its checkpoints no observation record, so it loads
+    with the default observation, which is the one it trained on.
     """
     run_dir = Path(run_dir)
     if not (run_dir / RUN_INFO_FILE).is_file():
@@ -197,8 +213,7 @@ def resume(run_dir: str | Path, *, progress: bool = True) -> Path:
         curriculum.load_state_dict(checkpoint["curriculum"])
         env.set_curriculum(curriculum.current.arena, curriculum.current.goal)
     env.load_state_dict(checkpoint["env"])
-    model = build_agent(config.agent.name, env_cfg.board_size, **config.agent.kwargs).to(device)
-    model.load_state_dict(checkpoint["model"])
+    model = load_policy(checkpoint, config, last).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=config.ppo.lr, eps=1e-5)
     optimizer.load_state_dict(checkpoint["optimizer"])
 
@@ -210,6 +225,7 @@ def resume(run_dir: str | Path, *, progress: bool = True) -> Path:
         status="running",
         resumed=[*record.info["resumed"], stamp],
         schema_version=SCHEMA_VERSION,
+        observation=observation_record(config),
     )
     print(
         f"Resuming {run_dir} after update {update} of {record.total_updates} on {device} "
@@ -274,10 +290,12 @@ def _loop(
     steps, n = ppo.rollout_steps, env_cfg.num_envs
     batch_size = steps * n
     num_updates = total_updates(config)
-    buffer = RolloutBuffer(steps, n, env.obs_shape, device)
+    obs_dtype = torch.uint8 if env.obs_is_binary else torch.float32
+    buffer = RolloutBuffer(steps, n, env.obs_shape, device, obs_dtype)
     env_steps, best_eval = start.env_steps, start.best_eval
     checkpoints = run_dir / CHECKPOINT_DIR
     config_dict = config_to_dict(config)
+    observation = observation_record(config)
 
     with MetricsLogger(run_dir, wall_time_offset=start.wall_time, purge_step=purge_step) as logger:
         bar = tqdm(
@@ -304,7 +322,7 @@ def _loop(
                 for t in range(steps):
                     actions, log_probs, values = model.act(obs)
                     next_obs, reward, terminated, truncated, info = env.step(actions)
-                    buffer.obs[t] = obs.to(torch.uint8)
+                    buffer.obs[t] = obs.to(buffer.obs.dtype)
                     buffer.actions[t] = actions
                     buffer.log_probs[t] = log_probs
                     buffer.values[t] = values
@@ -434,6 +452,7 @@ def _loop(
                 stats = evaluate(
                     model,
                     env_cfg,
+                    config.observation,
                     episodes=config.train.eval_episodes,
                     device=device,
                     seed=env_cfg.seed + EVAL_SEED_OFFSET,
@@ -455,6 +474,7 @@ def _loop(
                     "wall_time": logger.elapsed(),
                     "rng": capture_rng_state(device),
                     "env": env.state_dict(),
+                    "observation": observation,
                 }
                 if session.curriculum is not None:
                     state["curriculum"] = session.curriculum.state_dict()

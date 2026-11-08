@@ -1,17 +1,27 @@
-"""Turn config sections into live objects: device, seeding and RNG state, environments."""
+"""Turn config sections into live objects: device, seeding and RNG state, environments, policies.
+
+Every place a run's network is built goes through :func:`make_policy` (a new run) or
+:func:`load_policy` (a checkpoint), so its input size and channels always come from the run's
+observation.
+"""
 
 from __future__ import annotations
 
 import os
 import random
 from collections.abc import Mapping
+from dataclasses import replace
+from pathlib import Path
 from typing import Any
 
 import numpy as np
 import torch
 
-from snakeppo.config import EnvConfig, RewardConfig
+from snakeppo.agents import REGISTRY, build_agent
+from snakeppo.agents.networks import PolicyNetwork
+from snakeppo.config import Config, EnvConfig, ObservationConfig, RewardConfig
 from snakeppo.env import TorchSnakeEnv
+from snakeppo.observation import ObservationSpec, describe_record
 from snakeppo.rewards import SparseReward, build_reward
 
 EVAL_SEED_OFFSET = 10_000
@@ -81,6 +91,7 @@ def restore_rng_state(state: Mapping[str, Any]) -> None:
 def make_env(
     env: EnvConfig,
     reward: RewardConfig,
+    observation: ObservationConfig,
     *,
     num_envs: int,
     device: torch.device,
@@ -95,13 +106,22 @@ def make_env(
         reward=build_reward(reward, discount),
         device=device,
         seed=seed,
+        observation=ObservationSpec.from_config(observation),
     )
 
 
 def make_play_env(
-    env: EnvConfig, *, num_envs: int, device: torch.device, seed: int
+    env: EnvConfig,
+    observation: ObservationConfig,
+    *,
+    num_envs: int,
+    device: torch.device,
+    seed: int,
 ) -> TorchSnakeEnv:
-    """An env for eval and watching: the full board, and a reward nobody reads (``sparse``)."""
+    """An env for eval and watching: the full board, the run's observation, reward ``sparse``.
+
+    The reward is never read; eval and watch only count apples.
+    """
     return TorchSnakeEnv(
         num_envs,
         env.board_size,
@@ -109,4 +129,53 @@ def make_play_env(
         reward=SparseReward(),
         device=device,
         seed=seed,
+        observation=ObservationSpec.from_config(observation),
     )
+
+
+def observation_record(config: Config) -> dict[str, Any]:
+    """What ``run.json`` and every checkpoint store about the run's observation."""
+    return ObservationSpec.from_config(config.observation).record(config.env.board_size)
+
+
+def make_policy(config: Config) -> PolicyNetwork:
+    """The run's network, on CPU, sized from its observation (input side and channel count).
+
+    With the default observation this is exactly ``build_agent(name, env.board_size, **kwargs)``.
+    """
+    spec = ObservationSpec.from_config(config.observation)
+    name, size = config.agent.name, spec.size(config.env.board_size)
+    agent = REGISTRY.get(name)
+    if spec.view_size is not None and agent is not None and agent.requires_even_board and size % 2:
+        raise ValueError(
+            f"agent '{name}' needs an even input size, but observation.view: local feeds it "
+            f"observation.view_size ({spec.view_size}) cells a side"
+        )
+    return build_agent(name, size, in_channels=len(spec.channels), **config.agent.kwargs)
+
+
+def load_policy(checkpoint: Mapping[str, Any], config: Config, where: Path) -> PolicyNetwork:
+    """The network ``checkpoint`` holds, on CPU, once its observation matches ``config``'s.
+
+    ``where`` names the checkpoint in error messages. A schema-1 to 3 checkpoint records no
+    observation: it trained on the default one, which is what its config describes too.
+    """
+    expected = observation_record(config)
+    saved = checkpoint.get("observation")
+    if saved is None:
+        saved = observation_record(replace(config, observation=ObservationConfig()))
+    if saved != expected:
+        raise ValueError(
+            f"{where} was trained on {describe_record(saved)}, but its config describes "
+            f"{describe_record(expected)}; refusing to load it with the wrong observation"
+        )
+    model = make_policy(config)
+    try:
+        model.load_state_dict(checkpoint["model"])
+    except RuntimeError as error:
+        first_line = str(error).strip().splitlines()[0].rstrip(":")
+        raise ValueError(
+            f"{where} does not fit a '{config.agent.name}' network for "
+            f"{describe_record(expected)}: {first_line}"
+        ) from error
+    return model
