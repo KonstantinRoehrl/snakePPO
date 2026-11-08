@@ -827,6 +827,11 @@ select {
   background: color-mix(in srgb, var(--warn) 9%, var(--surface));
 }
 
+/* A notice heading a chart board: the panel's padding is above it, the card gap below. */
+.callout.board-notice {
+  margin: 0 0 1rem;
+}
+
 .callout .icon {
   margin-top: 0.15rem;
   color: var(--warn);

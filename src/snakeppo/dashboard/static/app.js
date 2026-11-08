@@ -11,8 +11,17 @@ const STATUSES = ["running", "stalled", "finished", "interrupted", "failed", "un
 const THEME_KEY = "snakeppo.dashboard.theme";
 const SVG_NS = "http:" + "//www.w3.org/2000/svg";
 const SMOKE_COMMAND = "uv run snakeppo train --config configs/smoke.yaml";
-// Switches that change what training curves measure, with the value a run without the key has.
-const CURVE_SWITCHES = { "reward.strategy": "classic", "curriculum.grow": "off" };
+// Switches that change what training curves measure: the value a run without the key has, and why.
+const CURVE_SWITCHES = {
+  "reward.strategy": {
+    fallback: "classic",
+    reason: "a different reward changes the returns the losses and value fit are measured on",
+  },
+  "curriculum.grow": {
+    fallback: "off",
+    reason: "curriculum stages train on a smaller arena or a shorter goal than the full board",
+  },
+};
 
 const state = {
   tab: "live",
@@ -676,7 +685,7 @@ function renderLiveCharts() {
 /** The CURVE_SWITCHES keys whose values differ between `runs`. */
 function incomparableSwitches(runs) {
   return Object.entries(CURVE_SWITCHES)
-    .filter(([key, fallback]) => new Set(runs.map((run) => settingValue(run.switches?.[key] ?? fallback))).size > 1)
+    .filter(([key, { fallback }]) => new Set(runs.map((run) => settingValue(run.switches?.[key] ?? fallback))).size > 1)
     .map(([key]) => key);
 }
 
@@ -686,14 +695,16 @@ function renderCompareNotice(runs) {
     keys.length
       ? h(
           "div",
-          { class: "callout", role: "note" },
+          { class: "callout board-notice", role: "note" },
           icon("alert"),
           h(
             "p",
             null,
             "These runs differ in ",
             keys.map((key, index) => [index ? " and " : "", code(key)]),
-            ", so their training curves (train score, losses, value fit) are not comparable: shaped rewards and curriculum stages change what those measure. The eval score is comparable, since every run is evaluated with greedy play on the full board.",
+            ", so their training curves (train score, losses, value fit) are not comparable: ",
+            keys.map((key) => CURVE_SWITCHES[key].reason).join(", and "),
+            ". The eval score is comparable, since every run is evaluated with greedy play on the full board.",
           ),
         )
       : [],

@@ -212,6 +212,13 @@ function xTitle(xMode) {
   return X_MODES.find((mode) => mode.id === xMode)?.title ?? xMode;
 }
 
+/** Y-axis settings for metrics with a known scale, so a flat curve keeps a meaningful axis. */
+function yScale(key) {
+  if (key.startsWith("eval/end_")) return { range: [0, 1] }; // fractions of eval games
+  if (key === "curriculum/stage") return { rangemode: "tozero", dtick: 1 };
+  return {};
+}
+
 function chartLayout(theme, chart, xMode, { empty, legend }) {
   const axis = {
     gridcolor: theme.grid,
@@ -232,7 +239,7 @@ function chartLayout(theme, chart, xMode, { empty, legend }) {
       tickformat: xMode === "env_steps" ? "~s" : "",
       hoverformat: xMode === "wall_time" ? ".1f" : "",
     },
-    yaxis: { ...axis, rangemode: chart.hero ? "tozero" : "normal" },
+    yaxis: { ...axis, rangemode: chart.hero ? "tozero" : "normal", ...yScale(chart.key) },
     showlegend: legend,
     legend: { orientation: "h", x: 0, xanchor: "left", y: 1.02, yanchor: "bottom" },
     hovermode: "x unified",
