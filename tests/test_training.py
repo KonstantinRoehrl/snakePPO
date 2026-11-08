@@ -1,4 +1,5 @@
 import json
+import math
 import os
 from pathlib import Path
 
@@ -6,7 +7,7 @@ import pytest
 import torch
 
 from snakeppo.agents import build_agent
-from snakeppo.config import EnvConfig, RewardConfig, apply_overrides, load_config
+from snakeppo.config import REWARD_STRATEGIES, EnvConfig, apply_overrides, load_config
 from snakeppo.evaluation import evaluate
 from snakeppo.ppo import trainer
 from snakeppo.ppo.trainer import train
@@ -24,11 +25,11 @@ def test_evaluate_counts_one_finished_episode_per_game_and_is_reproducible():
     model = build_agent("cnn", board_size=8)
     env = EnvConfig(board_size=8, starvation_steps=16)
     kwargs = {"episodes": 6, "device": torch.device("cpu"), "seed": 5}
-    first = evaluate(model, env, RewardConfig(), **kwargs)
+    first = evaluate(model, env, **kwargs)
     assert first.episodes == 6
     assert first.length_mean >= 1
     assert first.score_min <= first.score_mean <= first.score_max
-    assert evaluate(model, env, RewardConfig(), **kwargs) == first
+    assert evaluate(model, env, **kwargs) == first
     assert model.training
 
 
@@ -207,3 +208,12 @@ def test_deterministic_training_runs_on_cuda(tmp_path, restore_deterministic_set
         tmp_path, "train.device=cuda", "train.deterministic=true", f"agent.name={agent}"
     )
     assert len(_metric_lines(train(config, progress=False))) == 4
+
+
+@pytest.mark.parametrize("strategy", REWARD_STRATEGIES)
+def test_every_reward_strategy_trains_end_to_end(tmp_path, strategy):
+    lines = _metric_lines(
+        train(_smoke_config(tmp_path, f"reward.strategy={strategy}"), progress=False)
+    )
+    assert len(lines) == 4 and "eval/score_mean" in lines[-1]
+    assert all(math.isfinite(line["train/reward_mean"]) for line in lines)

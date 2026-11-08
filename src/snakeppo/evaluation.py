@@ -7,8 +7,8 @@ from dataclasses import dataclass
 import torch
 
 from snakeppo.agents.networks import PolicyNetwork
-from snakeppo.builders import make_env
-from snakeppo.config import EnvConfig, RewardConfig
+from snakeppo.builders import make_play_env
+from snakeppo.config import EnvConfig
 
 
 @dataclass(frozen=True)
@@ -32,7 +32,6 @@ class EvalStats:
 def evaluate(
     model: PolicyNetwork,
     env: EnvConfig,
-    reward: RewardConfig,
     *,
     episodes: int,
     device: torch.device,
@@ -41,11 +40,13 @@ def evaluate(
 ) -> EvalStats:
     """Play ``episodes`` games in parallel and count each game's first finished episode.
 
-    Starvation truncation bounds every episode, so this always terminates.
+    Games run on the full board with no goal and ignore the reward strategy, so scores
+    compare across reward strategies and curricula. Starvation truncation bounds every
+    episode, so this always terminates.
     """
     was_training = model.training
     model.eval()
-    game = make_env(env, reward, num_envs=episodes, device=device, seed=seed)
+    game = make_play_env(env, num_envs=episodes, device=device, seed=seed)
     obs = game.reset()
     finished = torch.zeros(episodes, dtype=torch.bool, device=game.device)
     scores = torch.zeros(episodes, device=game.device)

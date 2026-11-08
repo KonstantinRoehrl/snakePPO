@@ -13,7 +13,7 @@ import torch
 
 from snakeppo.agents import REGISTRY, available_agents, build_agent, count_parameters
 from snakeppo.agents.networks import PolicyNetwork
-from snakeppo.builders import EVAL_SEED_OFFSET, make_env, resolve_device
+from snakeppo.builders import EVAL_SEED_OFFSET, make_play_env, resolve_device
 from snakeppo.config import Config, ConfigError, config_from_dict, load_config, validate
 from snakeppo.dashboard.server import DEFAULT_PORT
 from snakeppo.evaluation import evaluate
@@ -166,7 +166,6 @@ def _eval(args: argparse.Namespace) -> int:
     stats = evaluate(
         model,
         config.env,
-        config.reward,
         episodes=episodes,
         device=device,
         seed=config.env.seed + EVAL_SEED_OFFSET,
@@ -190,9 +189,8 @@ def _watch(
 ) -> int:
     from snakeppo.viewer import Viewer
 
-    env = make_env(
+    env = make_play_env(
         config.env,
-        config.reward,
         num_envs=max(1, min(args.envs, 4)),
         device=device,
         seed=config.env.seed + EVAL_SEED_OFFSET,

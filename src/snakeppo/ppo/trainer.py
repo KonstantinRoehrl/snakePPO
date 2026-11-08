@@ -82,10 +82,8 @@ def train(config: Config, *, progress: bool = True) -> Path:
     validate(config)
     device = resolve_device(config.train.device)
     seed_everything(config.env.seed, config.train.deterministic)
+    env = _make_train_env(config, device)
     env_cfg = config.env
-    env = make_env(
-        env_cfg, config.reward, num_envs=env_cfg.num_envs, device=device, seed=env_cfg.seed
-    )
     model = build_agent(config.agent.name, env_cfg.board_size, **config.agent.kwargs).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=config.ppo.lr, eps=1e-5)
 
@@ -104,6 +102,18 @@ def train(config: Config, *, progress: bool = True) -> Path:
     obs = env.reset()
     session = _Session(run_dir, config, device, env, model, optimizer)
     return _run(session, obs, Progress(), progress=progress)
+
+
+def _make_train_env(config: Config, device: torch.device) -> TorchSnakeEnv:
+    env_cfg = config.env
+    return make_env(
+        env_cfg,
+        config.reward,
+        num_envs=env_cfg.num_envs,
+        device=device,
+        seed=env_cfg.seed,
+        discount=config.ppo.gamma,
+    )
 
 
 class ResumeError(ValueError):
@@ -153,9 +163,7 @@ def resume(run_dir: str | Path, *, progress: bool = True) -> Path:
 
     seed_everything(config.env.seed, config.train.deterministic)
     env_cfg = config.env
-    env = make_env(
-        env_cfg, config.reward, num_envs=env_cfg.num_envs, device=device, seed=env_cfg.seed
-    )
+    env = _make_train_env(config, device)
     env.load_state_dict(checkpoint["env"])
     model = build_agent(config.agent.name, env_cfg.board_size, **config.agent.kwargs).to(device)
     model.load_state_dict(checkpoint["model"])
@@ -379,7 +387,6 @@ def _loop(
                 stats = evaluate(
                     model,
                     env_cfg,
-                    config.reward,
                     episodes=config.train.eval_episodes,
                     device=device,
                     seed=env_cfg.seed + EVAL_SEED_OFFSET,
