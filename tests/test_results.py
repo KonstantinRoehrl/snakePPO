@@ -261,3 +261,11 @@ def test_switch_units_fold_only_keys_a_selector_owns():
     assert switch_unit("curriculum.promote_window") == "curriculum.grow"
     for shared in ("reward.apple", "reward.approach", "ppo.gamma", "ppo.target_kl"):
         assert switch_unit(shared) == shared
+
+
+def test_an_architecture_and_a_view_own_their_settings():
+    assert switch_unit("agent.kwargs") == "agent.name"
+    assert switch_unit("agent.name") == "agent.name"
+    assert switch_unit("observation.view_size") == "observation.view"
+    for own in ("observation.tail", "observation.body", "observation.hunger"):
+        assert switch_unit(own) == own
