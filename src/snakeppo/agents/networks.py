@@ -1,4 +1,7 @@
-"""Feed-forward policy/value networks. Layer structure is unchanged from the pre-C1 agents."""
+"""Feed-forward policy/value networks.
+
+``CNNPolicy``, ``SpatialCNNPolicy`` and ``ResNetPolicy`` keep the pre-C1 agents' layer structure.
+"""
 
 from __future__ import annotations
 
@@ -149,4 +152,117 @@ class ResNetPolicy(PolicyNetwork):
         out = self.relu(self.conv2(out) + self.downsample1(out))
         out = self.relu(self.conv3(out) + self.downsample2(out))
         shared = self.shared(out)
+        return self.policy(shared), self.value(shared).squeeze(-1)
+
+
+def conv_features(in_channels: int, width: int) -> nn.Sequential:
+    """Three 3x3 convs (``width``, ``2*width`` with stride 2, ``2*width``) pooled to 4x4, flattened.
+
+    Maps (B, C, S, S) to (B, 2 * width * 16) for any S, so a network built on it runs on any board.
+    """
+    return nn.Sequential(
+        nn.Conv2d(in_channels, width, 3, padding=1),
+        nn.ReLU(),
+        nn.Conv2d(width, 2 * width, 3, stride=2, padding=1),
+        nn.ReLU(),
+        nn.Conv2d(2 * width, 2 * width, 3, padding=1),
+        nn.ReLU(),
+        DeterministicAdaptiveAvgPool2d((4, 4)),
+        nn.Flatten(),
+    )
+
+
+class MLPPolicy(PolicyNetwork):
+    """Flatten, two hidden layers of 256. Its first layer is sized for one board, so it is bound."""
+
+    def __init__(self, board_size: int, in_channels: int = 4, num_actions: int = 3) -> None:
+        super().__init__()
+        self.shared = nn.Sequential(
+            nn.Flatten(),
+            nn.Linear(in_channels * board_size * board_size, 256),
+            nn.ReLU(),
+            nn.Linear(256, 256),
+            nn.ReLU(),
+        )
+        self.policy = nn.Linear(256, num_actions)
+        self.value = nn.Linear(256, 1)
+
+    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        shared = self.shared(x)
+        return self.policy(shared), self.value(shared).squeeze(-1)
+
+
+class ScalableCNNPolicy(PolicyNetwork):
+    """``conv_features`` of one ``width``, then a hidden layer of 256 (cnn-tiny/small/medium)."""
+
+    def __init__(
+        self, board_size: int, in_channels: int = 4, num_actions: int = 3, *, width: int
+    ) -> None:
+        super().__init__()
+        del board_size  # the pool in conv_features makes this network board-size independent
+        self.features = conv_features(in_channels, width)
+        self.shared = nn.Sequential(nn.Linear(2 * width * 16, 256), nn.ReLU())
+        self.policy = nn.Linear(256, num_actions)
+        self.value = nn.Linear(256, 1)
+
+    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        shared = self.shared(self.features(x))
+        return self.policy(shared), self.value(shared).squeeze(-1)
+
+
+def sinusoidal_positions_2d(
+    size: int, dim: int, device: torch.device | str = "cpu"
+) -> torch.Tensor:
+    """Fixed 2D sine/cosine positions for the cells of a ``size`` x ``size`` grid: (size*size, dim).
+
+    The first ``dim // 2`` dims encode the row and the rest the column, each as sines then cosines
+    of ``dim // 4`` frequencies. Rows are in row-major cell order, matching ``Tensor.flatten(2)``.
+    """
+    if dim % 4:
+        raise ValueError(f"the position dimension must be divisible by 4, got {dim}")
+    quarter = dim // 4
+    frequencies = 10000.0 ** (-torch.arange(quarter, device=device, dtype=torch.float32) / quarter)
+    angles = torch.arange(size, device=device, dtype=torch.float32)[:, None] * frequencies
+    axis = torch.cat([angles.sin(), angles.cos()], dim=1)  # (size, dim // 2)
+    rows = axis[:, None, :].expand(size, size, dim // 2)
+    columns = axis[None, :, :].expand(size, size, dim // 2)
+    return torch.cat([rows, columns], dim=-1).reshape(size * size, dim)
+
+
+ATTENTION_WIDTH = 64
+
+
+class AttentionPolicy(PolicyNetwork):
+    """Conv stem, one token per cell plus its 2D position, 2 pre-norm transformer layers, mean pool.
+
+    Positions are computed for the input's size on every call, so the network runs on any board.
+    """
+
+    def __init__(self, board_size: int, in_channels: int = 4, num_actions: int = 3) -> None:
+        super().__init__()
+        del board_size  # positions are computed per input, and the mean pool fixes the width
+        self.stem = nn.Sequential(nn.Conv2d(in_channels, ATTENTION_WIDTH, 3, padding=1), nn.ReLU())
+        # a ModuleList, not nn.TransformerEncoder, which warns about nested tensors with norm_first
+        self.layers = nn.ModuleList(
+            nn.TransformerEncoderLayer(
+                ATTENTION_WIDTH,
+                nhead=4,
+                dim_feedforward=128,
+                dropout=0.0,
+                batch_first=True,
+                norm_first=True,
+            )
+            for _ in range(2)
+        )
+        self.norm = nn.LayerNorm(ATTENTION_WIDTH)
+        self.shared = nn.Sequential(nn.Linear(ATTENTION_WIDTH, 256), nn.ReLU())
+        self.policy = nn.Linear(256, num_actions)
+        self.value = nn.Linear(256, 1)
+
+    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        tokens = self.stem(x).flatten(2).transpose(1, 2)  # (B, S*S, D), row-major cells
+        tokens = tokens + sinusoidal_positions_2d(x.shape[-1], ATTENTION_WIDTH, x.device)
+        for layer in self.layers:
+            tokens = layer(tokens)
+        shared = self.shared(self.norm(tokens).mean(dim=1))
         return self.policy(shared), self.value(shared).squeeze(-1)
