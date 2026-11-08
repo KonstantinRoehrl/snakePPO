@@ -1,0 +1,7 @@
+# Baseline reward plus a per-step hunger ramp and a timeout penalty when the snake starves.
+# Compare its seed sweep against one of configs/baseline.yaml with snakeppo results
+# (docs/experiments.md, Comparing runs).
+reward:
+  strategy: hunger
+train:
+  name: reward-hunger

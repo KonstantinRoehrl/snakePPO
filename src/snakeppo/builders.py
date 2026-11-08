@@ -12,6 +12,7 @@ import torch
 
 from snakeppo.config import EnvConfig, RewardConfig
 from snakeppo.env import TorchSnakeEnv
+from snakeppo.rewards import SparseReward, build_reward
 
 EVAL_SEED_OFFSET = 10_000
 
@@ -84,15 +85,28 @@ def make_env(
     num_envs: int,
     device: torch.device,
     seed: int,
+    discount: float,
 ) -> TorchSnakeEnv:
+    """The training env; ``discount`` is ``ppo.gamma``, which the potential strategy needs."""
     return TorchSnakeEnv(
         num_envs,
         env.board_size,
         starvation_steps=env.starvation_steps,
-        reward_apple=reward.apple,
-        reward_death=reward.death,
-        reward_approach=reward.approach,
-        reward_retreat=reward.retreat,
+        reward=build_reward(reward, discount),
+        device=device,
+        seed=seed,
+    )
+
+
+def make_play_env(
+    env: EnvConfig, *, num_envs: int, device: torch.device, seed: int
+) -> TorchSnakeEnv:
+    """An env for eval and watching: the full board, and a reward nobody reads (``sparse``)."""
+    return TorchSnakeEnv(
+        num_envs,
+        env.board_size,
+        starvation_steps=env.starvation_steps,
+        reward=SparseReward(),
         device=device,
         seed=seed,
     )

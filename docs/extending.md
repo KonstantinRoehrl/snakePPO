@@ -23,8 +23,21 @@
 4. If it has a visible effect, log it as a metric (and add the key to the
    `metrics.jsonl` table in [experiments.md](experiments.md#metricsjsonl)).
 5. Add a test proving that with the default value training behaves exactly as before.
-6. Turn it on in `configs/tuned.yaml` and add it to the switch table in
-   [experiments.md](experiments.md#switches).
+6. Turn a PPO switch on in `configs/tuned.yaml`; a reward or curriculum switch gets its own
+   preset under `configs/rewards/` or `configs/curriculum/` instead. Add it to the switch table
+   in [experiments.md](experiments.md#switches).
+
+## Add a reward strategy
+
+1. In `src/snakeppo/config.py`, add the name to `REWARD_STRATEGIES`, and any coefficient to
+   `RewardConfig` and `STRATEGY_PARAMETERS` (which rejects negative values), with a validation
+   rule in `validate` for anything stricter.
+2. In `src/snakeppo/rewards.py`, write a frozen dataclass with
+   `__call__(self, step: StepContext) -> torch.Tensor` and `register` a `RewardSpec` that
+   builds it from the `RewardConfig` and the discount.
+3. Add hand-computed tests to `tests/test_rewards.py`.
+4. Add `configs/rewards/<name>.yaml` and the rows in
+   [experiments.md](experiments.md#reward-strategies).
 
 ## Add an observation variant (C4)
 

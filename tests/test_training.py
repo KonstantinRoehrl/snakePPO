@@ -1,4 +1,5 @@
 import json
+import math
 import os
 from pathlib import Path
 
@@ -6,7 +7,7 @@ import pytest
 import torch
 
 from snakeppo.agents import build_agent
-from snakeppo.config import EnvConfig, RewardConfig, apply_overrides, load_config
+from snakeppo.config import REWARD_STRATEGIES, EnvConfig, apply_overrides, load_config
 from snakeppo.evaluation import evaluate
 from snakeppo.ppo import trainer
 from snakeppo.ppo.trainer import train
@@ -24,11 +25,11 @@ def test_evaluate_counts_one_finished_episode_per_game_and_is_reproducible():
     model = build_agent("cnn", board_size=8)
     env = EnvConfig(board_size=8, starvation_steps=16)
     kwargs = {"episodes": 6, "device": torch.device("cpu"), "seed": 5}
-    first = evaluate(model, env, RewardConfig(), **kwargs)
+    first = evaluate(model, env, **kwargs)
     assert first.episodes == 6
     assert first.length_mean >= 1
     assert first.score_min <= first.score_mean <= first.score_max
-    assert evaluate(model, env, RewardConfig(), **kwargs) == first
+    assert evaluate(model, env, **kwargs) == first
     assert model.training
 
 
@@ -45,6 +46,7 @@ def test_smoke_training_writes_a_complete_run_folder(tmp_path):
     assert [line["update"] for line in lines] == [1, 2, 3, 4]
     assert lines[-1]["env_steps"] == 512
     assert "eval/score_mean" in lines[1] and "eval/score_mean" not in lines[0]
+    assert not any(key.startswith("curriculum/") for line in lines for key in line)
     assert {"loss/policy", "ppo/approx_kl", "ppo/explained_variance", "train/fps"} <= set(lines[0])
     assert load_config(run_dir / "config.yaml") == _smoke_config(tmp_path)
     for name in ("best", "last"):
@@ -53,17 +55,18 @@ def test_smoke_training_writes_a_complete_run_folder(tmp_path):
     assert load_checkpoint(run_dir / "checkpoints" / "last.pt")["update"] == 4
 
 
-def test_finished_run_records_v2_run_info_and_checkpoints(tmp_path):
+def test_finished_run_records_schema_3_run_info_and_checkpoints(tmp_path):
     run_dir = train(_smoke_config(tmp_path, "train.group=g@1"), progress=False)
     info = json.loads((run_dir / "run.json").read_text("utf-8"))
-    assert info["schema_version"] == 2
+    assert info["schema_version"] == 3
     assert info["status"] == "finished"
     assert info["total_updates"] == 4
     assert info["group"] == "g@1"
     assert info["resumed"] == []
     last = load_checkpoint(run_dir / "checkpoints" / "last.pt")
-    assert last["schema_version"] == 2 and last["update"] == 4 and last["env_steps"] == 512
+    assert last["schema_version"] == 3 and last["update"] == 4 and last["env_steps"] == 512
     assert {"best_eval", "wall_time", "rng", "env"} <= last.keys()
+    assert "curriculum" not in last  # only runs with curriculum.grow on store it
     assert last["best_eval"] == max(
         line["eval/score_mean"] for line in _metric_lines(run_dir) if "eval/score_mean" in line
     )
@@ -207,3 +210,12 @@ def test_deterministic_training_runs_on_cuda(tmp_path, restore_deterministic_set
         tmp_path, "train.device=cuda", "train.deterministic=true", f"agent.name={agent}"
     )
     assert len(_metric_lines(train(config, progress=False))) == 4
+
+
+@pytest.mark.parametrize("strategy", REWARD_STRATEGIES)
+def test_every_reward_strategy_trains_end_to_end(tmp_path, strategy):
+    lines = _metric_lines(
+        train(_smoke_config(tmp_path, f"reward.strategy={strategy}"), progress=False)
+    )
+    assert len(lines) == 4 and "eval/score_mean" in lines[-1]
+    assert all(math.isfinite(line["train/reward_mean"]) for line in lines)

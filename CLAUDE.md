@@ -8,7 +8,8 @@ switch, and the code defaults are the plain baseline. Start with `docs/architect
 - Setup: `uv sync` (CUDA torch on Windows/Linux; CPU-only: `uv sync --no-group cuda --group cpu`)
 - Verify (run before every commit): `uv run ruff check . && uv run ruff format --check . && uv run pytest`
 - Train: `uv run snakeppo train --config configs/baseline.yaml [--set section.key=value]`
-- Evaluate: `uv run snakeppo eval runs/<run> [--render]`; list agents: `uv run snakeppo agents`
+- Evaluate: `uv run snakeppo eval runs/<run> [--render]`; list agents: `uv run snakeppo agents`; list reward strategies:
+  `uv run snakeppo rewards`
 - Resume an interrupted run: `uv run snakeppo train --resume runs/<run>`
 - Seed sweep: `uv run snakeppo sweep --seeds 1,2,3 --config configs/baseline.yaml [--jobs 2]`
 - Verdicts across seed groups: `uv run snakeppo results [--baseline GROUP]`

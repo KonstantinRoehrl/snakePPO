@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 import torch
 
+from snakeppo import runs
 from snakeppo.cli import main
 from snakeppo.config import load_config
 from snakeppo.ppo import trainer
@@ -26,7 +27,7 @@ def _curve(run_dir):
     ]
 
 
-def _interrupted_run(runs_dir, monkeypatch, after_update):
+def _interrupted_run(runs_dir, monkeypatch, after_update, *overrides):
     """A smoke run (4 updates, evals and checkpoints at 2 and 4) stopped by Ctrl+C."""
     real_log = trainer.MetricsLogger.log
 
@@ -38,7 +39,7 @@ def _interrupted_run(runs_dir, monkeypatch, after_update):
     with monkeypatch.context() as patch:
         patch.setattr(trainer.MetricsLogger, "log", log)
         with pytest.raises(KeyboardInterrupt):
-            train(_smoke_config(runs_dir), progress=False)
+            train(_smoke_config(runs_dir, *overrides), progress=False)
     (run_dir,) = runs_dir.iterdir()
     return run_dir
 
@@ -79,6 +80,27 @@ def test_resume_refuses_a_schema_1_run(tmp_path, monkeypatch):
     info["schema_version"] = 1
     (run_dir / "run.json").write_text(json.dumps(info), "utf-8")
     with pytest.raises(ResumeError, match="written before resume support"):
+        resume(run_dir, progress=False)
+
+
+def test_resume_continues_a_schema_2_run_exactly_and_raises_it_to_schema_3(tmp_path, monkeypatch):
+    reference = train(_smoke_config(tmp_path / "reference"), progress=False)
+    with monkeypatch.context() as patch:
+        patch.setattr(runs, "SCHEMA_VERSION", 2)
+        run_dir = _interrupted_run(tmp_path / "cut", monkeypatch, after_update=3)
+    assert read_run_info(run_dir)["schema_version"] == 2
+    assert load_checkpoint(run_dir / "checkpoints" / "last.pt")["schema_version"] == 2
+
+    resume(run_dir, progress=False)
+    assert _curve(run_dir) == _curve(reference)
+    assert read_run_info(run_dir)["schema_version"] == 3
+    assert load_checkpoint(run_dir / "checkpoints" / "last.pt")["schema_version"] == 3
+
+
+def test_resume_refuses_a_schema_newer_than_it_knows(tmp_path, monkeypatch):
+    run_dir = _interrupted_run(tmp_path, monkeypatch, after_update=3)
+    update_run_info(run_dir, schema_version=4)
+    with pytest.raises(ResumeError, match="has schema 4, newer than this snakeppo can resume"):
         resume(run_dir, progress=False)
 
 

@@ -12,13 +12,13 @@ import io
 import statistics
 from collections import Counter
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from datetime import datetime
 from typing import Any
 
 import numpy as np
 
-from snakeppo.config import Config, config_to_dict
+from snakeppo.config import STRATEGY_PARAMETERS, Config, CurriculumConfig, config_to_dict
 from snakeppo.runs import RunRecord
 
 # Keys that name, place or schedule a run without changing what it learns.
@@ -35,6 +35,14 @@ BOOKKEEPING_KEYS = frozenset(
 )
 # Keys that set the budget and how runs are measured: shown as the budget, never a switch.
 PROTOCOL_KEYS = ("train.total_env_steps", "train.eval_interval", "train.eval_episodes")
+# A selector and the keys only it reads are one switch: changing a strategy together with its
+# own coefficient is still one experiment.
+SELECTOR_KEYS = {
+    "reward.strategy": tuple(f"reward.{name}" for name in STRATEGY_PARAMETERS),
+    "curriculum.grow": tuple(
+        f"curriculum.{f.name}" for f in fields(CurriculumConfig) if f.name != "grow"
+    ),
+}
 SCORE_EVALS = 3
 MIN_PAIRED_SEEDS = 3
 BOOTSTRAP_RESAMPLES = 10_000
@@ -75,6 +83,14 @@ def switches(config: Config) -> dict[str, Any]:
     """A config's learning differences from the code defaults, protocol keys excluded."""
     differences = config_differences(learning_config(Config()), learning_config(config))
     return {k: new for k, (_, new) in differences.items() if k not in PROTOCOL_KEYS}
+
+
+def switch_unit(key: str) -> str:
+    """The switch a differing key belongs to: its selector, or the key itself."""
+    for selector, owned in SELECTOR_KEYS.items():
+        if key == selector or key in owned:
+            return selector
+    return key
 
 
 # ------------------------------------------------------------------ scores
@@ -270,8 +286,8 @@ def _row(group: _Group, reference: _Group | None) -> GroupRow:
         reason = f"duplicate seed {seed} in the reference group"
     elif protocol_diff:
         reason = f"budget or eval settings differ from the reference ({', '.join(protocol_diff)})"
-    elif len(differences) > 1:
-        reason = f"{len(differences)} learning keys differ from the reference (at most 1)"
+    elif len(units := {switch_unit(key) for key in differences}) > 1:
+        reason = f"{len(units)} learning switches differ from the reference (at most 1)"
     elif len(paired) < MIN_PAIRED_SEEDS:
         reason = f"only {len(paired)} paired finished seeds (need {MIN_PAIRED_SEEDS})"
     if reason is not None:

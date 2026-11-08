@@ -69,7 +69,7 @@ def test_run_info_records_schema_identity_and_v2_fields(tmp_path):
         group="demo@20261107-093000",
     )
     assert json.loads((run_dir / "run.json").read_text("utf-8")) == info == read_run_info(run_dir)
-    assert info["schema_version"] == SCHEMA_VERSION == 2
+    assert info["schema_version"] == SCHEMA_VERSION == 3
     assert {"name", "created", "git_sha", "agent", "param_count", "device"} <= info.keys()
     assert info["status"] == "running"
     assert info["total_updates"] == 40

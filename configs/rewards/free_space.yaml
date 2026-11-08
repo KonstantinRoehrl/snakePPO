@@ -1,0 +1,7 @@
+# Baseline reward plus a penalty for the share of free cells the head can no longer reach.
+# Compare its seed sweep against one of configs/baseline.yaml with snakeppo results
+# (docs/experiments.md, Comparing runs).
+reward:
+  strategy: free_space
+train:
+  name: reward-free-space

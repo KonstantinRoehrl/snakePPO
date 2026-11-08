@@ -21,7 +21,15 @@ from snakeppo.builders import (
     restore_rng_state,
     seed_everything,
 )
-from snakeppo.config import Config, config_from_dict, config_to_dict, save_config, validate
+from snakeppo.config import (
+    Config,
+    config_from_dict,
+    config_to_dict,
+    save_config,
+    total_updates,
+    validate,
+)
+from snakeppo.curriculum import PROMOTED_NONE, Curriculum
 from snakeppo.env import TorchSnakeEnv
 from snakeppo.evaluation import evaluate
 from snakeppo.ppo.functional import (
@@ -34,6 +42,7 @@ from snakeppo.ppo.functional import (
 from snakeppo.runs import (
     CHECKPOINT_DIR,
     CONFIG_FILE,
+    RESUMABLE_SCHEMAS,
     RUN_INFO_FILE,
     SCHEMA_VERSION,
     MetricsLogger,
@@ -43,7 +52,6 @@ from snakeppo.runs import (
     load_run,
     save_checkpoint,
     stall_window,
-    total_updates,
     truncate_metrics,
     update_run_info,
     write_run_info,
@@ -82,10 +90,9 @@ def train(config: Config, *, progress: bool = True) -> Path:
     validate(config)
     device = resolve_device(config.train.device)
     seed_everything(config.env.seed, config.train.deterministic)
+    env = _make_train_env(config, device)
+    curriculum = _make_curriculum(config, env)
     env_cfg = config.env
-    env = make_env(
-        env_cfg, config.reward, num_envs=env_cfg.num_envs, device=device, seed=env_cfg.seed
-    )
     model = build_agent(config.agent.name, env_cfg.board_size, **config.agent.kwargs).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=config.ppo.lr, eps=1e-5)
 
@@ -102,26 +109,56 @@ def train(config: Config, *, progress: bool = True) -> Path:
     )
     print(f"Training '{config.agent.name}' on {device}; writing run folder {run_dir}")
     obs = env.reset()
-    session = _Session(run_dir, config, device, env, model, optimizer)
+    session = _Session(run_dir, config, device, env, model, optimizer, curriculum)
     return _run(session, obs, Progress(), progress=progress)
+
+
+def _make_train_env(config: Config, device: torch.device) -> TorchSnakeEnv:
+    env_cfg = config.env
+    return make_env(
+        env_cfg,
+        config.reward,
+        num_envs=env_cfg.num_envs,
+        device=device,
+        seed=env_cfg.seed,
+        discount=config.ppo.gamma,
+    )
+
+
+def _make_curriculum(config: Config, env: TorchSnakeEnv) -> Curriculum | None:
+    """The run's curriculum, with ``env`` set to its first stage; ``None`` when it is off."""
+    if config.curriculum.grow == "off":
+        return None
+    curriculum = Curriculum(config.curriculum, config.env.board_size)
+    env.set_curriculum(curriculum.current.arena, curriculum.current.goal)
+    return curriculum
 
 
 class ResumeError(ValueError):
     """A run folder that cannot be continued exactly; the message says why."""
 
 
+def _check_resumable(schema: int | None, what: Path) -> None:
+    if schema in RESUMABLE_SCHEMAS:
+        return
+    if schema is None or schema < RESUMABLE_SCHEMAS[0]:
+        raise ResumeError(f"{what} was written before resume support; cannot be resumed exactly")
+    raise ResumeError(
+        f"{what} has schema {schema}, newer than this snakeppo can resume ({SCHEMA_VERSION})"
+    )
+
+
 def resume(run_dir: str | Path, *, progress: bool = True) -> Path:
     """Continue an interrupted, failed or stalled run in place from ``checkpoints/last.pt``.
 
     The continuation is exact on CPU: the same metrics an uninterrupted run would have logged,
-    apart from ``wall_time`` and ``train/fps``.
+    apart from ``wall_time`` and ``train/fps``. A schema-2 run continues as schema 3.
     """
     run_dir = Path(run_dir)
     if not (run_dir / RUN_INFO_FILE).is_file():
         raise FileNotFoundError(f"{run_dir} is not a run folder (no {RUN_INFO_FILE})")
     record = load_run(run_dir)
-    if record.info.get("schema_version", 1) < SCHEMA_VERSION:
-        raise ResumeError(f"{run_dir} was written before resume support; cannot be resumed exactly")
+    _check_resumable(record.info.get("schema_version", 1), run_dir)
     if record.status == "finished":
         raise ResumeError(f"{run_dir} already finished all {record.total_updates} updates")
     if record.status == "running":
@@ -135,8 +172,7 @@ def resume(run_dir: str | Path, *, progress: bool = True) -> Path:
     if not last.is_file():
         raise ResumeError(f"{run_dir} has no {CHECKPOINT_DIR}/last.pt to resume from")
     checkpoint = load_checkpoint(last)
-    if checkpoint.get("schema_version") != SCHEMA_VERSION:
-        raise ResumeError(f"{last} was written before resume support; cannot be resumed exactly")
+    _check_resumable(checkpoint.get("schema_version"), last)
 
     config = config_from_dict(checkpoint["config"])
     device = resolve_device(config.train.device)
@@ -153,9 +189,13 @@ def resume(run_dir: str | Path, *, progress: bool = True) -> Path:
 
     seed_everything(config.env.seed, config.train.deterministic)
     env_cfg = config.env
-    env = make_env(
-        env_cfg, config.reward, num_envs=env_cfg.num_envs, device=device, seed=env_cfg.seed
-    )
+    env = _make_train_env(config, device)
+    curriculum = _make_curriculum(config, env)
+    if curriculum is not None:
+        if "curriculum" not in checkpoint:
+            raise ResumeError(f"{last} has no curriculum state to continue from")
+        curriculum.load_state_dict(checkpoint["curriculum"])
+        env.set_curriculum(curriculum.current.arena, curriculum.current.goal)
     env.load_state_dict(checkpoint["env"])
     model = build_agent(config.agent.name, env_cfg.board_size, **config.agent.kwargs).to(device)
     model.load_state_dict(checkpoint["model"])
@@ -165,7 +205,12 @@ def resume(run_dir: str | Path, *, progress: bool = True) -> Path:
     update, env_steps = checkpoint["update"], checkpoint["env_steps"]
     dropped = truncate_metrics(run_dir, after_update=update)
     stamp = datetime.now().astimezone().isoformat(timespec="seconds")
-    update_run_info(run_dir, status="running", resumed=[*record.info["resumed"], stamp])
+    update_run_info(
+        run_dir,
+        status="running",
+        resumed=[*record.info["resumed"], stamp],
+        schema_version=SCHEMA_VERSION,
+    )
     print(
         f"Resuming {run_dir} after update {update} of {record.total_updates} on {device} "
         f"(dropped {dropped} metrics lines logged after that checkpoint)"
@@ -173,7 +218,7 @@ def resume(run_dir: str | Path, *, progress: bool = True) -> Path:
     # last: building the model above drew from the global RNG
     restore_rng_state(checkpoint["rng"])
     start = Progress(update, env_steps, checkpoint["best_eval"], checkpoint["wall_time"])
-    session = _Session(run_dir, config, device, env, model, optimizer)
+    session = _Session(run_dir, config, device, env, model, optimizer, curriculum)
     first_new_step = env_steps + config.ppo.rollout_steps * env_cfg.num_envs
     return _run(session, env.observe(), start, progress=progress, purge_step=first_new_step)
 
@@ -188,6 +233,7 @@ class _Session:
     env: TorchSnakeEnv
     model: PolicyNetwork
     optimizer: torch.optim.Optimizer
+    curriculum: Curriculum | None = None
 
 
 def _run(
@@ -372,6 +418,15 @@ def _loop(
                     "train/length_mean": torch.cat(finished_lengths).mean().item(),
                     "train/return_mean": torch.cat(finished_returns).mean().item(),
                 }
+            if session.curriculum is not None:
+                # between updates, and before eval and checkpoint, so a resume sees the new stage
+                stage_scores = torch.cat(finished_scores).tolist() if finished_scores else []
+                result = session.curriculum.end_update(stage_scores)
+                metrics |= result.metrics
+                if result.promoted != PROMOTED_NONE:
+                    stage = session.curriculum.current
+                    env.set_curriculum(stage.arena, stage.goal)
+                    obs = env.reset()  # partial episodes are dropped, never counted
 
             is_eval = update % config.train.eval_interval == 0 or update == num_updates
             improved = False
@@ -379,7 +434,6 @@ def _loop(
                 stats = evaluate(
                     model,
                     env_cfg,
-                    config.reward,
                     episodes=config.train.eval_episodes,
                     device=device,
                     seed=env_cfg.seed + EVAL_SEED_OFFSET,
@@ -402,6 +456,8 @@ def _loop(
                     "rng": capture_rng_state(device),
                     "env": env.state_dict(),
                 }
+                if session.curriculum is not None:
+                    state["curriculum"] = session.curriculum.state_dict()
                 save_checkpoint(checkpoints / "last.pt", **state)
                 if improved:
                     save_checkpoint(checkpoints / "best.pt", **state)

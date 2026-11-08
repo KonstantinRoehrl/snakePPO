@@ -21,6 +21,14 @@ def test_agents_lists_every_architecture(capsys):
         assert name in out
 
 
+def test_rewards_lists_every_strategy(capsys):
+    assert main(["rewards"]) == 0
+    out = capsys.readouterr().out
+    assert "reward.strategy=NAME" in out
+    for name in ("classic", "sparse", "distance", "potential", "hunger", "free_space"):
+        assert f"  {name} " in out
+
+
 def test_train_eval_compare_round_trip(tmp_path, capsys):
     args = ["train", "--config", str(SMOKE), "--set", f"train.runs_dir={tmp_path.as_posix()}"]
     assert main([*args, "--name", "cli", "--seed", "3"]) == 0
@@ -29,7 +37,8 @@ def test_train_eval_compare_round_trip(tmp_path, capsys):
     assert str(run_dir) in capsys.readouterr().out
 
     assert main(["eval", str(run_dir), "--episodes", "2", "--device", "cpu"]) == 0
-    assert "over 2 episodes (greedy)" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "over 2 episodes (greedy)" in out and "ended by wall" in out
     last = run_dir / "checkpoints" / "last.pt"
     assert main(["eval", str(last), "--stochastic", "--episodes", "2", "--device", "cpu"]) == 0
     assert "(stochastic)" in capsys.readouterr().out

@@ -7,11 +7,13 @@ export const X_MODES = [
   { id: "wall_time", label: "Wall time", title: "wall time (minutes)" },
 ];
 export const DEFAULT_X = "env_steps";
+export const SCORE_MEANING =
+  "apples eaten in greedy full-board play; independent of reward strategy and curriculum";
 
 export const HERO = {
   id: "eval",
   title: "Eval score",
-  hint: "eval/score_mean: the mean score of greedy play at each evaluation.",
+  hint: `eval/score_mean, at each evaluation: ${SCORE_MEANING}.`,
   key: "eval/score_mean",
 };
 
@@ -19,7 +21,7 @@ export const CARDS = [
   {
     id: "training",
     title: "Training",
-    hint: "What the agent achieves while it explores, and how well the value head predicts returns.",
+    hint: "What the agent achieves while it explores (in its current curriculum stage, if any), and how well the value head predicts returns.",
     keys: ["train/score_mean", "ppo/explained_variance", "train/length_mean"],
   },
   {
@@ -40,6 +42,19 @@ export const CARDS = [
       "ppo/lr",
       "ppo/entropy_coef",
     ],
+  },
+  {
+    id: "evaluation",
+    title: "Evaluation",
+    hint: "How the eval games end and how many steps each apple takes, from the same greedy full-board games as the score.",
+    keys: ["eval/steps_per_apple", "eval/end_wall", "eval/end_body", "eval/end_starved"],
+  },
+  {
+    id: "curriculum",
+    title: "Curriculum",
+    hint: "The stage each update trained in, from 0 (the smallest arena or goal) up to the full board.",
+    keys: ["curriculum/stage"],
+    optional: true, // shown only while a run on the board has the metric
   },
 ];
 
@@ -197,6 +212,13 @@ function xTitle(xMode) {
   return X_MODES.find((mode) => mode.id === xMode)?.title ?? xMode;
 }
 
+/** Y-axis settings for metrics with a known scale, so a flat curve keeps a meaningful axis. */
+function yScale(key) {
+  if (key.startsWith("eval/end_")) return { range: [0, 1] }; // fractions of eval games
+  if (key === "curriculum/stage") return { rangemode: "tozero", dtick: 1 };
+  return {};
+}
+
 function chartLayout(theme, chart, xMode, { empty, legend }) {
   const axis = {
     gridcolor: theme.grid,
@@ -217,7 +239,7 @@ function chartLayout(theme, chart, xMode, { empty, legend }) {
       tickformat: xMode === "env_steps" ? "~s" : "",
       hoverformat: xMode === "wall_time" ? ".1f" : "",
     },
-    yaxis: { ...axis, rangemode: chart.hero ? "tozero" : "normal" },
+    yaxis: { ...axis, rangemode: chart.hero ? "tozero" : "normal", ...yScale(chart.key) },
     showlegend: legend,
     legend: { orientation: "h", x: 0, xanchor: "left", y: 1.02, yanchor: "bottom" },
     hovermode: "x unified",
@@ -305,10 +327,12 @@ export class ChartBoard {
     root.append(heroCard);
     for (const spec of CARDS) {
       const section = card(spec, `${prefix}-${spec.id}-title`);
+      section.hidden = Boolean(spec.optional);
       const grid = element("div", "chart-grid");
       for (const key of spec.keys) {
         const id = `${prefix}-${key.replace(/[^a-z0-9]+/gi, "-")}`;
-        grid.append(this.#frame({ id, key, hero: false, sparse: key.startsWith("eval/") }));
+        const optional = spec.optional ? section : null;
+        grid.append(this.#frame({ id, key, hero: false, sparse: key.startsWith("eval/"), optional }));
       }
       section.append(grid);
       root.append(section);
@@ -341,10 +365,13 @@ export class ChartBoard {
             groupTraces(group, chart.key, xMode, { ...options, band: !chart.hero }),
           )
         : (runs ?? []).flatMap((run) => runTraces(run, chart.key, xMode, options));
-      const layout = chartLayout(theme, chart, xMode, {
-        empty: !hasValues(traces),
-        legend: chart.hero && legend,
-      });
+      const empty = !hasValues(traces);
+      if (chart.optional) {
+        chart.optional.hidden = empty;
+        // a hidden chart would be drawn at the wrong size; draw it once it is shown
+        if (empty) continue;
+      }
+      const layout = chartLayout(theme, chart, xMode, { empty, legend: chart.hero && legend });
       Plotly.react(chart.plot, traces, layout, PLOT_CONFIG);
       chart.frame.removeAttribute("data-loading");
       if (!chart.bound) this.#bindSync(chart);

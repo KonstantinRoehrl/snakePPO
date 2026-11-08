@@ -1,0 +1,8 @@
+# Baseline with Manhattan-distance shaping: +/- reward.distance_scale per cell toward or
+# away from the food.
+# Compare its seed sweep against one of configs/baseline.yaml with snakeppo results
+# (docs/experiments.md, Comparing runs).
+reward:
+  strategy: distance
+train:
+  name: reward-distance

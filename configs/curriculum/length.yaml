@@ -1,0 +1,7 @@
+# Baseline trained toward growing goal lengths (4, 8, 16, 32 cells), then the full game.
+# Compare its seed sweep against one of configs/baseline.yaml with snakeppo results
+# (docs/experiments.md, Comparing runs).
+curriculum:
+  grow: length
+train:
+  name: curriculum-length
