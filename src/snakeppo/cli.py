@@ -11,10 +11,16 @@ from pathlib import Path
 
 import torch
 
-from snakeppo.agents import REGISTRY, available_agents, build_agent, count_parameters
+from snakeppo.agents import REGISTRY, PolicyPlayer, available_agents, build_agent, count_parameters
 from snakeppo.agents.networks import PolicyNetwork
-from snakeppo.builders import EVAL_SEED_OFFSET, load_policy, make_play_env, resolve_device
-from snakeppo.config import Config, ConfigError, config_from_dict, load_config, validate
+from snakeppo.builders import (
+    EVAL_SEED_OFFSET,
+    load_policy,
+    make_play_env,
+    make_policy,
+    resolve_device,
+)
+from snakeppo.config import Config, ConfigError, EnvConfig, config_from_dict, load_config, validate
 from snakeppo.dashboard.server import DEFAULT_PORT
 from snakeppo.evaluation import evaluate
 from snakeppo.results import FORMATS, format_results, results_table
@@ -51,6 +57,12 @@ def _parser() -> argparse.ArgumentParser:
     ev.add_argument("--episodes", type=int, help="episodes to play (default: train.eval_episodes)")
     ev.add_argument("--stochastic", action="store_true", help="sample actions instead of argmax")
     ev.add_argument("--device", default="auto", help="auto, cpu, cuda or mps")
+    ev.add_argument(
+        "--board-size",
+        type=int,
+        metavar="N",
+        help="play on an NxN board (default: the run's board; at least 5)",
+    )
     ev.add_argument("--render", action="store_true", help="watch the agent play in a window")
     ev.add_argument("--envs", type=int, default=4, help="games shown with --render (1-4)")
     ev.add_argument("--sleep", type=float, default=0.05, help="seconds between rendered steps")
@@ -159,15 +171,40 @@ def _load_model(args: argparse.Namespace) -> tuple[PolicyNetwork, Config, Path, 
     return model.to(device).eval(), config, checkpoint_path, device
 
 
+def _play_env_config(config: Config, board_size: int | None) -> EnvConfig:
+    """The run's env section, on ``board_size`` if given.
+
+    Not re-validated: the rest of the config describes training (a curriculum's ``start_board``
+    may not fit a smaller play board), and eval and watch read only the env and observation.
+    """
+    if board_size is None:
+        return config.env
+    if board_size < 5:
+        raise ValueError(f"--board-size must be at least 5, got {board_size}")
+    trained, name = config.env.board_size, config.agent.name
+    if (
+        board_size != trained
+        and config.observation.view == "full"
+        and not REGISTRY[name].size_agnostic
+    ):
+        raise ValueError(
+            f"agent '{name}' is board-bound: it trained on a {trained}x{trained} board and "
+            f"cannot play {board_size}x{board_size}; use a size-agnostic architecture "
+            "(see 'snakeppo agents') or train with observation.view: local"
+        )
+    return replace(config.env, board_size=board_size)
+
+
 def _eval(args: argparse.Namespace) -> int:
     model, config, checkpoint_path, device = _load_model(args)
+    play = _play_env_config(config, args.board_size)
     greedy = not args.stochastic
     if args.render:
-        return _watch(model, config, device, args, greedy)
+        return _watch(model, config, play, device, args, greedy)
     episodes = args.episodes or config.train.eval_episodes
     stats = evaluate(
         model,
-        config.env,
+        play,
         config.observation,
         episodes=episodes,
         device=device,
@@ -177,7 +214,8 @@ def _eval(args: argparse.Namespace) -> int:
     mode = "greedy" if greedy else "stochastic"
     per_apple = "-" if stats.steps_per_apple is None else f"{stats.steps_per_apple:.1f}"
     print(
-        f"Evaluated {checkpoint_path} over {stats.episodes} episodes ({mode}): "
+        f"Evaluated {checkpoint_path} on a {play.board_size}x{play.board_size} board "
+        f"over {stats.episodes} episodes ({mode}): "
         f"score mean {stats.score_mean:.2f}, max {stats.score_max:.0f}, "
         f"min {stats.score_min:.0f}; episode length mean {stats.length_mean:.1f}; "
         f"ended by wall {stats.end_wall:.0%}, body {stats.end_body:.0%}, "
@@ -189,6 +227,7 @@ def _eval(args: argparse.Namespace) -> int:
 def _watch(
     model: PolicyNetwork,
     config: Config,
+    play: EnvConfig,
     device: torch.device,
     args: argparse.Namespace,
     greedy: bool,
@@ -196,19 +235,20 @@ def _watch(
     from snakeppo.viewer import Viewer
 
     env = make_play_env(
-        config.env,
+        play,
         config.observation,
         num_envs=max(1, min(args.envs, 4)),
         device=device,
-        seed=config.env.seed + EVAL_SEED_OFFSET,
+        seed=play.seed + EVAL_SEED_OFFSET,
     )
+    player = PolicyPlayer(model, env.num_envs, device)
     obs = env.reset()
     finished = 0
     print("Close the window to stop.")
-    with Viewer(config.env.board_size, env.num_envs) as viewer, torch.no_grad():
+    with Viewer(env.board_size, env.num_envs) as viewer, torch.no_grad():
         while viewer.draw(env.render_grid(), env.score.tolist(), env.render_body_order()):
-            actions, _, _ = model.act(obs, greedy=greedy)
-            obs, _, _, _, info = env.step(actions)
+            obs, _, _, _, info = env.step(player.act(obs, greedy))
+            player.end_episodes(info["done"])
             for score in info["episode_score"][info["done"]].tolist():
                 finished += 1
                 print(f"Episode {finished} finished with score {score:.0f}")
@@ -220,13 +260,15 @@ def _watch(
 
 def _agents(args: argparse.Namespace) -> int:
     print(f"Architectures (parameter counts for a {args.board_size}x{args.board_size} board):")
+    print(f"  {'name':<12} {'parameters':>12}  {'any size':<8}  description")
     for name in available_agents():
         spec = REGISTRY[name]
         try:
             params = f"{count_parameters(build_agent(name, args.board_size)):,}"
         except ValueError as error:
             params = f"n/a ({error})"
-        print(f"  {name:<12} {params:>12}  {spec.description}")
+        any_size = "yes" if spec.size_agnostic else "no"
+        print(f"  {name:<12} {params:>12}  {any_size:<8}  {spec.description}")
     return 0
 
 
@@ -262,10 +304,10 @@ def _compare(args: argparse.Namespace) -> int:
 def _sweep(args: argparse.Namespace) -> int:
     from snakeppo.sweep import format_outcomes, group_id, run_sweep
 
-    # resolve the config exactly as each child will, so a bad option fails once, up front
+    # resolve the config and build its network exactly as each child will, so a bad option
+    # (agent, agent.kwargs, observation) fails once, up front
     config = _experiment_config(args, args.overrides)
-    if config.agent.name not in REGISTRY:
-        raise ValueError(f"unknown agent '{config.agent.name}'; see 'snakeppo agents'")
+    make_policy(config)
     train_args = [] if args.config is None else ["--config", str(args.config)]
     for override in args.overrides:
         train_args += ["--set", override]
