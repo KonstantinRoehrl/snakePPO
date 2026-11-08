@@ -5,7 +5,8 @@ Routes (GET only; every other method gets 405)::
     /                               static/index.html
     /static/<file>                  a file directly inside static/
     /vendor/plotly.min.js           the plotly.js bundled in the ``plotly`` Python package
-    /api/runs                       {"runs": [summary], "skipped": [{"id", "error"}]}
+    /api/runs                       {"runs": [summary], "skipped": [{"id", "error"}],
+                                     "runs_dir": str}
     /api/runs/<id>                  {"run": summary, "config": {...}, "info": {...}}
     /api/runs/<id>/metrics?since=N  {"lines": [...], "offset": int, "reset": bool}
     /api/results[?baseline=G]       {"rows": [...], "left_out": int, "baseline": str | null}
@@ -213,6 +214,7 @@ class _Handler(BaseHTTPRequestHandler):
         return {
             "runs": [run_summary(record) for record, _ in scanned if record is not None],
             "skipped": [problem for _, problem in scanned if problem is not None],
+            "runs_dir": self.server.runs_dir.as_posix(),
         }
 
     @staticmethod

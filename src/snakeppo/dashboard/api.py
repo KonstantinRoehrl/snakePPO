@@ -7,6 +7,7 @@ Every function returns plain JSON-ready data; :func:`json_safe` turns non-finite
 from __future__ import annotations
 
 import math
+import time
 from collections.abc import Sequence
 from dataclasses import asdict
 from typing import Any
@@ -19,7 +20,13 @@ from snakeppo.results import (
     run_score,
     switches,
 )
-from snakeppo.runs import MetricsChunk, RunRecord, seconds_per_update
+from snakeppo.runs import (
+    MetricsChunk,
+    RunRecord,
+    last_write_time,
+    seconds_per_update,
+    stall_window,
+)
 
 
 def json_safe(value: Any) -> Any:
@@ -33,8 +40,12 @@ def json_safe(value: Any) -> Any:
     return value
 
 
-def run_summary(record: RunRecord) -> dict[str, Any]:
-    """One run-list entry: identity, status, progress, score and switches."""
+def run_summary(record: RunRecord, now: float | None = None) -> dict[str, Any]:
+    """One run-list entry: identity, status, progress, freshness, score and switches.
+
+    ``quiet_seconds`` is measured here rather than in the browser so the page needs no clock
+    of its own and sees the same silence the stall rule sees.
+    """
     score = run_score(record.metrics)
     info = record.info
     return {
@@ -51,6 +62,10 @@ def run_summary(record: RunRecord) -> dict[str, Any]:
         "total_updates": record.total_updates,
         "env_steps": record.env_steps,
         "seconds_per_update": seconds_per_update(record.metrics),
+        "quiet_seconds": max(
+            0.0, (time.time() if now is None else now) - last_write_time(record.path)
+        ),
+        "stall_seconds": stall_window(record.metrics),
         "score": score.value,
         "score_evals": score.evals,
         "switches": switches(record.config),

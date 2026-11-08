@@ -19,6 +19,8 @@ const state = {
   group: false,
   baseline: "",
   runs: null, // null until the first answer from /api/runs
+  runsDir: null, // the runs folder as the server names it, for copy-ready commands
+  runsSeenAt: 0, // Date.now() of the last /api/runs answer; run quiet_seconds were measured then
   skipped: [],
   filters: { text: "", agent: "", group: "", status: "", switch: "" },
   problem: null, // {kind: "offline" | "server", message}
@@ -126,6 +128,24 @@ function runLabel(run) {
 
 function switchStrings(run) {
   return Object.entries(run.switches ?? {}).map(([key, value]) => `${key}=${settingValue(value)}`);
+}
+
+/** Switch settings every known run shares, such as a smoke config's sizes: noise when telling runs apart. */
+function sharedSwitches(runs) {
+  if (runs.length < 2) return new Set();
+  const [first, ...rest] = runs.map((run) => new Set(switchStrings(run)));
+  return new Set([...first].filter((text) => rest.every((set) => set.has(text))));
+}
+
+/** The switches that tell `run` apart from the other known runs. */
+function distinctSwitches(run, shared) {
+  return switchStrings(run).filter((text) => !shared.has(text));
+}
+
+function quietText(seconds) {
+  if (seconds < 10) return "metrics just written";
+  if (seconds < 90) return `last metrics ${Math.round(seconds)} s ago`;
+  return `last metrics ${duration(seconds)} ago`;
 }
 
 function progressBar(run) {
@@ -286,7 +306,7 @@ function fillSelect(select, firstLabel, values) {
   const current = select.value;
   select.replaceChildren(
     h("option", { value: "" }, firstLabel),
-    values.map((value) => h("option", { value }, value)),
+    ...values.map((value) => h("option", { value }, value)),
   );
   select.value = values.includes(current) ? current : "";
   if (select.value !== current) {
@@ -306,19 +326,22 @@ function renderFilters() {
     "Any status",
     STATUSES.filter((status) => present.has(status)),
   );
-  fillSelect(form.elements.switch, "Any switch", distinct(runs.flatMap(switchStrings)));
+  const shared = sharedSwitches(runs);
+  fillSelect(form.elements.switch, "Any switch", distinct(runs.flatMap((run) => distinctSwitches(run, shared))));
   const disabled = state.runs === null || runs.length === 0;
   for (const control of form.elements) control.disabled = disabled;
 }
 
-function runItem(run, selected) {
-  const switches = switchStrings(run);
+function runItem(run, selected, shared) {
+  // A group's seeds share their switches, so the section header names them once instead.
+  const switches = run.group ? [] : distinctSwitches(run, shared);
+  const all = switchStrings(run);
   return h(
     "li",
     null,
     h(
       "label",
-      { class: selected ? "run is-selected" : "run", title: run.id },
+      { class: selected ? "run is-selected" : "run", title: all.length ? `${run.id}\n${all.join("\n")}` : run.id },
       h("input", { type: "checkbox", checked: selected, dataset: { runId: run.id } }),
       h(
         "span",
@@ -407,19 +430,23 @@ function renderSidebar() {
         h("p", null, h("button", { type: "button", class: "button", onclick: clearFilters }, "Clear filters")),
       );
     }
-    return runSections(filtered).map((section, index) =>
-      h(
+    const shared = sharedSwitches(runs);
+    return runSections(filtered).map((section, index) => {
+      const grouped = section.runs[0].group;
+      const switches = grouped ? distinctSwitches(section.runs[0], shared) : [];
+      return h(
         "section",
         { class: "run-section", "aria-labelledby": `run-section-${index}` },
         h(
           "h3",
           { id: `run-section-${index}` },
-          h("span", null, section.title),
+          h("span", { class: "run-section-title" }, section.title),
           h("span", { class: "num" }, String(section.runs.length)),
+          switches.length ? h("span", { class: "run-section-switches" }, switches.join(", ")) : null,
         ),
-        h("ul", { class: "run-list" }, section.runs.map((run) => runItem(run, selected.has(run.id)))),
-      ),
-    );
+        h("ul", { class: "run-list" }, section.runs.map((run) => runItem(run, selected.has(run.id), shared))),
+      );
+    });
   });
   if (changed) {
     scroller.scrollTop = scrollTop;
@@ -536,7 +563,8 @@ function renderLive() {
   }
   boardNode.hidden = false;
   const ticked = compareRuns().length;
-  show(header, JSON.stringify([run, ticked]), () => liveHeader(run, ticked));
+  show(header, JSON.stringify([run, ticked, state.runsSeenAt]), () => liveHeader(run, ticked));
+  renderFreshness();
   renderLiveCharts();
 }
 
@@ -549,13 +577,22 @@ function liveHeader(run, ticked) {
   if (run.status === "running" && typeof run.seconds_per_update === "number" && remaining > 0) {
     facts.push(h("span", { class: "num" }, `about ${duration(remaining * run.seconds_per_update)} left`));
   }
+  if (run.status === "running" && typeof run.quiet_seconds === "number") {
+    facts.push(
+      h("span", {
+        class: "num freshness",
+        dataset: { quiet: run.quiet_seconds, stall: run.stall_seconds, seenAt: state.runsSeenAt },
+      }),
+    );
+  }
   if (typeof run.env_steps === "number") {
     facts.push(h("span", { class: "num" }, `${compact.format(run.env_steps)} env steps`));
   }
   facts.push(h("span", { class: "num" }, scoreText(run)));
   if (run.agent) facts.push(h("span", null, `agent ${run.agent}`));
   if (run.device) facts.push(h("span", null, `on ${run.device}`));
-  const switches = switchStrings(run);
+  const shared = sharedSwitches(state.runs ?? []);
+  const switches = [...distinctSwitches(run, shared), ...switchStrings(run).filter((text) => shared.has(text))];
   const title = run.group ? runLabel(run) : run.name || run.id;
   const pieces = [
     h("div", { class: "run-header-top" }, h("h2", null, title), badge(run.status)),
@@ -566,7 +603,15 @@ function liveHeader(run, ticked) {
       { class: "chips", "aria-label": "Switches" },
       h("span", { class: "muted" }, "Switches:"),
       switches.length
-        ? switches.map((text) => h("span", { class: "chip" }, text))
+        ? switches.map((text) =>
+            h(
+              "span",
+              shared.has(text)
+                ? { class: "chip is-shared", title: "Every run here has this setting" }
+                : { class: "chip" },
+              text,
+            ),
+          )
         : h("span", null, "none — baseline"),
     ),
   ];
@@ -580,7 +625,7 @@ function liveHeader(run, ticked) {
           "p",
           null,
           "No metrics for longer than the stall window; the process may be gone. Resume it with ",
-          code(`uv run snakeppo train --resume <runs folder>/${run.id}`),
+          code(`uv run snakeppo train --resume ${state.runsDir ?? "<runs folder>"}/${run.id}`),
           ".",
         ),
       ),
@@ -598,6 +643,16 @@ function liveHeader(run, ticked) {
   const error = state.metricErrors.get(run.id);
   if (error) pieces.push(h("p", { class: "inline-error" }, `Metrics could not be read: ${error}`));
   return h("div", { class: "run-header" }, pieces);
+}
+
+/** Ages each freshness note by the time since the server measured it, between run-list polls. */
+function renderFreshness() {
+  for (const node of document.querySelectorAll(".freshness")) {
+    const quiet = Number(node.dataset.quiet) + (Date.now() - Number(node.dataset.seenAt)) / 1000;
+    node.textContent = quietText(quiet);
+    // Flag it at half the stall window: still running, but quieter than this run usually is.
+    node.dataset.late = String(quiet > Number(node.dataset.stall) / 2);
+  }
 }
 
 function renderLiveCharts() {
@@ -783,18 +838,41 @@ async function refreshResults() {
   renderResults();
 }
 
+const protocolKey = (row) => JSON.stringify(row.protocol ?? null);
+
+/** Groups that can serve as a reference: another group shares their budget and eval settings. */
+function referenceCandidates(rows) {
+  const counts = new Map();
+  for (const row of rows) counts.set(protocolKey(row), (counts.get(protocolKey(row)) ?? 0) + 1);
+  return rows.filter((row) => counts.get(protocolKey(row)) > 1).map((row) => row.group);
+}
+
+function chooseReference(group) {
+  state.baseline = group;
+  update();
+  refreshResults();
+  $("baseline-picker").focus();
+}
+
 function renderBaselinePicker() {
   const picker = $("baseline-picker");
-  const groups = new Set((state.runs ?? []).map((run) => run.group).filter(Boolean));
-  for (const row of state.results.payload?.rows ?? []) groups.add(row.group);
-  if (state.baseline) groups.add(state.baseline);
-  const values = [...groups].sort();
-  const signature = JSON.stringify(values);
+  const rows = state.results.payload?.rows ?? [];
+  const byGroup = new Map(rows.map((row) => [row.group, row]));
+  for (const run of state.runs ?? []) if (run.group && !byGroup.has(run.group)) byGroup.set(run.group, null);
+  if (state.baseline && !byGroup.has(state.baseline)) byGroup.set(state.baseline, null);
+  const usable = new Set(referenceCandidates(rows));
+  const options = [...byGroup.keys()].sort().map((group) => {
+    const row = byGroup.get(group);
+    const budget = typeof row?.budget === "number" ? ` · ${compact.format(row.budget)} steps` : "";
+    const alone = Boolean(row) && !usable.has(group) && group !== state.baseline;
+    return { group, label: `${group}${budget}${alone ? " (no other group at this budget)" : ""}`, alone };
+  });
+  const signature = JSON.stringify(options);
   if (picker.dataset.options !== signature) {
     picker.dataset.options = signature;
     picker.replaceChildren(
-      h("option", { value: "" }, "Newest baseline at the same budget"),
-      values.map((value) => h("option", { value }, value)),
+      h("option", { value: "" }, "Auto: newest no-switch group at the same budget"),
+      ...options.map(({ group, label, alone }) => h("option", { value: group, disabled: alone }, label)),
     );
   }
   picker.value = state.baseline;
@@ -802,9 +880,9 @@ function renderBaselinePicker() {
   picker.setAttribute("aria-invalid", String(failed));
 }
 
-function verdictCell(row) {
+function verdictCell(row, waiting) {
   if (row.verdict === null || row.verdict === undefined) {
-    return h("td", { class: "muted" }, `withheld: ${row.reason ?? "no reason given"}`);
+    return h("td", { class: "muted" }, waiting ? "needs a reference" : `withheld: ${row.reason ?? "no reason given"}`);
   }
   if (row.verdict === "reference") return h("td", null, h("span", { class: "badge", dataset: { verdict: "reference" } }, "reference"));
   return h(
@@ -815,7 +893,7 @@ function verdictCell(row) {
   );
 }
 
-function resultRows(row) {
+function resultRows(row, { waiting, showReference }) {
   const score =
     typeof row.score_std === "number" ? `${fixed(row.score_mean)} ± ${fixed(row.score_std)}` : fixed(row.score_mean);
   const differences =
@@ -823,21 +901,54 @@ function resultRows(row) {
       .map(([key, [, value]]) => `${key}=${settingValue(value)}`)
       .join(", ") || "-";
   const notes = [];
-  if (row.unpaired_seeds?.length) notes.push(`unpaired seeds ${row.unpaired_seeds.join(", ")}`);
+  const judged = row.verdict !== null && row.verdict !== undefined && row.verdict !== "reference";
+  if (judged && row.unpaired_seeds?.length) notes.push(`unpaired seeds ${row.unpaired_seeds.join(", ")}`);
+  if (judged && row.ci_low === row.ci_high) {
+    notes.push("every paired seed differs by the same amount, so the interval has no width");
+  }
   notes.push(...(row.notes ?? []));
-  const main = h(
-    "tr",
-    { class: notes.length ? "has-notes" : null },
+  const cells = [
     h("td", null, h("strong", null, row.group)),
     h("td", { class: "nowrap" }, typeof row.budget === "number" ? integer.format(row.budget) : "-"),
     h("td", null, `${row.finished}/${row.seeds}`),
     h("td", { class: "nowrap" }, score),
-    h("td", null, row.reference ?? "-"),
+    showReference ? h("td", null, row.reference ?? "-") : null,
     h("td", null, differences),
-    verdictCell(row),
-  );
+    verdictCell(row, waiting),
+  ].filter(Boolean);
+  const main = h("tr", { class: notes.length ? "has-notes" : null }, cells);
   if (!notes.length) return [main];
-  return [main, h("tr", { class: "row-notes" }, h("td", { colspan: 7 }, notes.join("; ")))];
+  return [main, h("tr", { class: "row-notes" }, h("td", { colspan: cells.length }, notes.join("; ")))];
+}
+
+function referenceGuide(rows) {
+  const candidates = referenceCandidates(rows);
+  return h(
+    "div",
+    { class: "callout guide", role: "status" },
+    icon("info"),
+    h(
+      "div",
+      null,
+      h("h2", null, "Pick a reference group"),
+      h(
+        "p",
+        null,
+        "No group here runs the code defaults at a matching budget, so there is nothing to judge the others against automatically. Groups trained with ",
+        code("configs/smoke.yaml"),
+        " never count as the baseline.",
+      ),
+      candidates.length
+        ? h(
+            "div",
+            { class: "guide-actions" },
+            candidates.map((group) =>
+              h("button", { type: "button", class: "button", onclick: () => chooseReference(group) }, `Judge against ${group}`),
+            ),
+          )
+        : h("p", { class: "muted" }, "No two groups share a budget and eval settings yet, so none can be compared."),
+    ),
+  );
 }
 
 function renderResults() {
@@ -847,7 +958,7 @@ function renderResults() {
   const errorNode = $("results-error");
   show(errorNode, JSON.stringify(current ? error : null), () =>
     current && error
-      ? h("p", { class: "inline-error", role: "alert" }, `${error}. Pick another reference group or the newest baseline.`)
+      ? h("p", { class: "inline-error", role: "alert" }, `${error}. Pick another reference group or the automatic choice.`)
       : [],
   );
   const body = $("results-body");
@@ -863,7 +974,9 @@ function renderResults() {
           h(
             "tbody",
             null,
-            Array.from({ length: 4 }, () => h("tr", null, h("td", null, h("span", { class: "skeleton skeleton-line" })))),
+            Array.from({ length: 4 }, () =>
+              h("tr", null, Array.from({ length: 6 }, () => h("td", null, h("span", { class: "skeleton skeleton-line" })))),
+            ),
           ),
         ),
       );
@@ -887,16 +1000,25 @@ function renderResults() {
           : null,
       );
     }
-    const columns = ["Group", "Budget", "Seeds", "Score", "Reference", "Differences", "vs reference"];
+    const unjudged = (row) => row.verdict === null || row.verdict === undefined;
+    const waiting = payload.baseline === null && payload.rows.every(unjudged);
+    const references = new Set(payload.rows.map((row) => row.reference).filter(Boolean));
+    const showReference = references.size > 1;
+    const rows = [...payload.rows].sort((a, b) => (b.verdict === "reference") - (a.verdict === "reference"));
+    const columns = ["Group", "Budget", "Seeds", "Score", showReference ? "Reference" : null, "Differences", "Δ mean [95% CI]"];
     return [
+      waiting ? referenceGuide(payload.rows) : null,
+      references.size === 1
+        ? h("p", { class: "table-caption" }, "Each group is judged against ", h("strong", null, [...references][0]), " on paired seeds.")
+        : null,
       h(
         "div",
         { class: "table-wrap" },
         h(
           "table",
           { class: "table" },
-          h("thead", null, h("tr", null, columns.map((name) => h("th", { scope: "col" }, name)))),
-          h("tbody", null, payload.rows.flatMap(resultRows)),
+          h("thead", null, h("tr", null, columns.filter(Boolean).map((name) => h("th", { scope: "col" }, name)))),
+          h("tbody", null, rows.flatMap((row) => resultRows(row, { waiting, showReference }))),
         ),
       ),
       payload.left_out
@@ -970,6 +1092,8 @@ const runsLoop = every(RUNS_EVERY_MS, async () => {
     const payload = await fetchRuns();
     state.runs = payload.runs ?? [];
     state.skipped = payload.skipped ?? [];
+    state.runsDir = payload.runs_dir ?? null;
+    state.runsSeenAt = Date.now();
     clearProblem();
   } catch (error) {
     noteProblem(error);
@@ -1125,6 +1249,7 @@ function start() {
   wire();
   update();
   runsLoop.kick();
+  setInterval(renderFreshness, 1000);
 }
 
 start();

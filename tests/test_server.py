@@ -85,10 +85,13 @@ def test_run_list_and_detail(dashboard):
     server, runs = dashboard
     finished = _run(runs, "g@1", 1, "ppo.target_kl=0.02")
     (runs / "not-a-run").mkdir()
-    (listed,) = _json(server, "/api/runs")["runs"]
+    payload = _json(server, "/api/runs")
+    assert payload["runs_dir"] == runs.as_posix()
+    (listed,) = payload["runs"]
     assert listed["id"] == finished.name and listed["group"] == "g@1" and listed["seed"] == 1
     assert listed["status"] == "finished" and listed["update"] == 3 and listed["total_updates"] == 3
     assert listed["score"] == 2.0 and listed["switches"] == {"ppo.target_kl": 0.02}
+    assert 0 <= listed["quiet_seconds"] < 60 and listed["stall_seconds"] >= 60
     detail = _json(server, f"/api/runs/{finished.name}")
     assert detail["run"]["id"] == finished.name
     assert detail["config"]["ppo"]["target_kl"] == 0.02 and detail["info"]["agent"] == "cnn"

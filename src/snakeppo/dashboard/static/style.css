@@ -523,6 +523,7 @@ select {
   top: 0;
   z-index: 1;
   display: flex;
+  flex-wrap: wrap;
   justify-content: space-between;
   gap: 0.5rem;
   padding: 0.75rem 0.85rem 0.3rem;
@@ -579,6 +580,16 @@ select {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.run-section-title {
+  min-width: 0;
+}
+
+.run-section-switches {
+  flex-basis: 100%;
+  color: var(--ink);
+  font-weight: 600;
 }
 
 .run-id {
@@ -674,9 +685,14 @@ select {
 
 .badge[data-status="interrupted"],
 .badge[data-status="unknown"],
-.badge[data-verdict="inconclusive"],
-.badge[data-verdict="reference"] {
+.badge[data-verdict="inconclusive"] {
   --hue: var(--neutral);
+}
+
+/* The reference is what the others are measured against, not an outcome: outline only. */
+.badge[data-verdict="reference"] {
+  --hue: var(--accent);
+  background: transparent;
 }
 
 .progress {
@@ -816,6 +832,30 @@ select {
   color: var(--warn);
 }
 
+.callout.guide {
+  margin: 0 0 1rem;
+  padding: 0.85rem 1rem;
+  border-color: color-mix(in srgb, var(--accent) 35%, var(--line));
+  background: color-mix(in srgb, var(--accent) 6%, var(--surface));
+}
+
+.callout.guide .icon {
+  color: var(--accent);
+}
+
+.callout.guide h2 {
+  margin-bottom: 0.3rem;
+  font-size: var(--text-lg);
+  font-weight: 650;
+}
+
+.guide-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-top: 0.75rem;
+}
+
 .inline-error {
   margin-top: 0.75rem;
   color: var(--bad);
@@ -869,6 +909,19 @@ select {
   border-radius: 4px;
   background: var(--surface-2);
   overflow-wrap: anywhere;
+}
+
+/* A setting every run has (a smoke config's sizes) tells nothing apart, so it steps back. */
+.chip.is-shared {
+  border-color: var(--line-strong);
+  border-style: dashed;
+  background: transparent;
+  color: var(--ink-2);
+}
+
+.freshness[data-late="true"] {
+  color: var(--warn);
+  font-weight: 600;
 }
 
 /* ------------------------------------------------------------------ cards and charts */
@@ -1003,6 +1056,12 @@ select {
 
 .results-bar .field {
   width: min(22rem, 100%);
+}
+
+.table-caption {
+  margin-bottom: 0.6rem;
+  color: var(--ink-2);
+  font-size: var(--text-sm);
 }
 
 .table-foot {
