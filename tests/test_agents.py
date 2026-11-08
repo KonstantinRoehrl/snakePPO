@@ -23,6 +23,7 @@ def test_registry_lists_every_architecture():
         "cnn-spatial",
         "cnn-tiny",
         "mlp",
+        "recurrent",
         "resnet",
     ]
 
@@ -73,7 +74,9 @@ def test_board_bound_agents_are_flagged_and_reject_another_size(name):
 def test_unknown_agent_names_the_available_ones():
     with pytest.raises(
         ValueError,
-        match="attention, cnn, cnn-medium, cnn-small, cnn-spatial, cnn-tiny, mlp, resnet",
+        match=(
+            "attention, cnn, cnn-medium, cnn-small, cnn-spatial, cnn-tiny, mlp, recurrent, resnet"
+        ),
     ):
         build_agent("lstm", board_size=16)
 

@@ -18,6 +18,7 @@ from snakeppo.agents.networks import (
     ScalableCNNPolicy,
     SpatialCNNPolicy,
 )
+from snakeppo.agents.recurrent import RecurrentCNNPolicy
 
 
 @dataclass(frozen=True)
@@ -109,6 +110,14 @@ register(
         "attention",
         "Conv stem, one token per cell, 2 transformer layers of 64, mean-pooled head",
         AttentionPolicy,
+        size_agnostic=True,
+    )
+)
+register(
+    AgentSpec(
+        "recurrent",
+        "cnn-small encoder, then a GRU of 256 (or an LSTM with agent.kwargs cell: lstm), MLP head",
+        RecurrentCNNPolicy,
         size_agnostic=True,
     )
 )
