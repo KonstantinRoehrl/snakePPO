@@ -1,0 +1,7 @@
+# Baseline with the attention network: one token per cell, 2 transformer layers of 64.
+# Compare its seed sweep against one of configs/baseline.yaml with snakeppo results
+# (docs/experiments.md, Comparing runs).
+agent:
+  name: attention
+train:
+  name: agent-attention

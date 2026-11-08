@@ -329,8 +329,13 @@ def test_eval_plays_a_local_view_run_of_a_board_bound_network_on_any_board(tmp_p
             "observation.view_size (5) cells a side",
         ),
         (("agent.kwargs={foo: 1}",), "agent 'cnn' does not accept agent.kwargs 'foo'"),
+        (
+            ("agent.name=recurrent", "env.num_envs=5", "ppo.minibatch_size=32"),
+            "agent 'recurrent' trains on whole envs: ppo.rollout_steps * env.num_envs // "
+            "ppo.minibatch_size gives 2 minibatches, which must divide env.num_envs (5)",
+        ),
     ],
-    ids=["local-view-even-board-network", "unknown-agent-kwargs"],
+    ids=["local-view-even-board-network", "unknown-agent-kwargs", "recurrent-batching"],
 )
 def test_sweep_builds_the_network_once_before_any_seed_starts(
     tmp_path, monkeypatch, capsys, overrides, message

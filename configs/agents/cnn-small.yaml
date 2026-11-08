@@ -1,0 +1,7 @@
+# Baseline with the cnn-small network: 3 conv layers of width 32, adaptive 4x4 pool, MLP head.
+# Compare its seed sweep against one of configs/baseline.yaml with snakeppo results
+# (docs/experiments.md, Comparing runs).
+agent:
+  name: cnn-small
+train:
+  name: agent-cnn-small

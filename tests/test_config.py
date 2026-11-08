@@ -149,13 +149,25 @@ def test_every_preset_loads(path):
     load_config(path)
 
 
+# The switch every preset in a folder turns on; each observation preset turns on its own key.
+FOLDER_SWITCHES = {
+    "rewards": "reward.strategy",
+    "curriculum": "curriculum.grow",
+    "agents": "agent.name",
+}
+
+
 @pytest.mark.parametrize("path", sorted(PRESETS.glob("*/*.yaml")), ids=_preset_id)
-def test_reward_and_curriculum_presets_turn_on_one_switch(path):
+def test_every_folder_preset_turns_on_one_switch(path):
     config = load_config(path)
-    assert {switch_unit(key) for key in switches(config)} == {
-        {"rewards": "reward.strategy", "curriculum": "curriculum.grow"}[path.parent.name]
-    }
-    assert config.train.name.startswith(path.parent.name.removesuffix("s"))
+    units = {switch_unit(key) for key in switches(config)}
+    assert len(units) == 1, units
+    folder = path.parent.name
+    if folder == "observation":
+        assert units.pop().startswith("observation.")
+    else:
+        assert units == {FOLDER_SWITCHES[folder]}
+    assert config.train.name.startswith(folder.removesuffix("s"))
 
 
 def test_exponential_entropy_schedule_needs_a_positive_start_coefficient():

@@ -1,0 +1,7 @@
+# Baseline with the tail channel: the tail cell 1.0 and the segment it moves into next 0.5.
+# Compare its seed sweep against one of configs/baseline.yaml with snakeppo results
+# (docs/experiments.md, Comparing runs).
+observation:
+  tail: true
+train:
+  name: observation-tail

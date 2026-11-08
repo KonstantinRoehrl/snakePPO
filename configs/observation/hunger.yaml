@@ -1,0 +1,7 @@
+# Baseline with the hunger channel: steps since the last apple over env.starvation_steps.
+# Compare its seed sweep against one of configs/baseline.yaml with snakeppo results
+# (docs/experiments.md, Comparing runs).
+observation:
+  hunger: true
+train:
+  name: observation-hunger
