@@ -1,4 +1,4 @@
-"""``snakeppo`` command line: train, eval, agents, compare, sweep, results, serve."""
+"""``snakeppo`` command line: train, eval, agents, rewards, compare, sweep, results, serve."""
 
 from __future__ import annotations
 
@@ -18,6 +18,7 @@ from snakeppo.config import Config, ConfigError, config_from_dict, load_config, 
 from snakeppo.dashboard.server import DEFAULT_PORT
 from snakeppo.evaluation import evaluate
 from snakeppo.results import FORMATS, format_results, results_table
+from snakeppo.rewards import REWARDS, available_rewards
 from snakeppo.runs import (
     find_runs,
     load_checkpoint,
@@ -56,6 +57,8 @@ def _parser() -> argparse.ArgumentParser:
 
     agents = commands.add_parser("agents", help="list available architectures")
     agents.add_argument("--board-size", type=int, default=16)
+
+    commands.add_parser("rewards", help="list available reward strategies")
 
     compare = commands.add_parser("compare", help="summarise runs as a table")
     compare.add_argument("paths", nargs="*", type=Path, default=[Path("runs")])
@@ -172,10 +175,13 @@ def _eval(args: argparse.Namespace) -> int:
         greedy=greedy,
     )
     mode = "greedy" if greedy else "stochastic"
+    per_apple = "-" if stats.steps_per_apple is None else f"{stats.steps_per_apple:.1f}"
     print(
         f"Evaluated {checkpoint_path} over {stats.episodes} episodes ({mode}): "
         f"score mean {stats.score_mean:.2f}, max {stats.score_max:.0f}, "
-        f"min {stats.score_min:.0f}; episode length mean {stats.length_mean:.1f}"
+        f"min {stats.score_min:.0f}; episode length mean {stats.length_mean:.1f}; "
+        f"ended by wall {stats.end_wall:.0%}, body {stats.end_body:.0%}, "
+        f"starvation {stats.end_starved:.0%}; steps per apple {per_apple}"
     )
     return 0
 
@@ -220,6 +226,13 @@ def _agents(args: argparse.Namespace) -> int:
         except ValueError as error:
             params = f"n/a ({error})"
         print(f"  {name:<12} {params:>12}  {spec.description}")
+    return 0
+
+
+def _rewards(args: argparse.Namespace) -> int:
+    print("Reward strategies (choose one with --set reward.strategy=NAME; default classic):")
+    for name in available_rewards():
+        print(f"  {name:<11} {REWARDS[name].description}")
     return 0
 
 
@@ -301,6 +314,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "train": _train,
         "eval": _eval,
         "agents": _agents,
+        "rewards": _rewards,
         "compare": _compare,
         "sweep": _sweep,
         "results": _results,
