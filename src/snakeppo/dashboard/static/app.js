@@ -2,7 +2,7 @@
 // Everything shown comes from the read-only GET API in api.js.
 
 import { MetricsStore, fetchDiff, fetchResults, fetchRuns } from "./api.js";
-import { ChartBoard, DEFAULT_X, X_MODES, readTheme, seriesColor } from "./charts.js";
+import { ChartBoard, DEFAULT_X, SCORE_MEANING, X_MODES, readTheme, seriesColor } from "./charts.js";
 
 const RUNS_EVERY_MS = 5000;
 const METRICS_EVERY_MS = 2000;
@@ -11,6 +11,8 @@ const STATUSES = ["running", "stalled", "finished", "interrupted", "failed", "un
 const THEME_KEY = "snakeppo.dashboard.theme";
 const SVG_NS = "http:" + "//www.w3.org/2000/svg";
 const SMOKE_COMMAND = "uv run snakeppo train --config configs/smoke.yaml";
+// Switches that change what training curves measure, with the value a run without the key has.
+const CURVE_SWITCHES = { "reward.strategy": "classic", "curriculum.grow": "off" };
 
 const state = {
   tab: "live",
@@ -671,8 +673,36 @@ function renderLiveCharts() {
 }
 
 // ------------------------------------------------------------------ Compare
+/** The CURVE_SWITCHES keys whose values differ between `runs`. */
+function incomparableSwitches(runs) {
+  return Object.entries(CURVE_SWITCHES)
+    .filter(([key, fallback]) => new Set(runs.map((run) => settingValue(run.switches?.[key] ?? fallback))).size > 1)
+    .map(([key]) => key);
+}
+
+function renderCompareNotice(runs) {
+  const keys = state.runs === null || runs.length < 2 ? [] : incomparableSwitches(runs);
+  show($("compare-notice"), JSON.stringify(keys), () =>
+    keys.length
+      ? h(
+          "div",
+          { class: "callout", role: "note" },
+          icon("alert"),
+          h(
+            "p",
+            null,
+            "These runs differ in ",
+            keys.map((key, index) => [index ? " and " : "", code(key)]),
+            ", so their training curves (train score, losses, value fit) are not comparable: shaped rewards and curriculum stages change what those measure. The eval score is comparable, since every run is evaluated with greedy play on the full board.",
+          ),
+        )
+      : [],
+  );
+}
+
 function renderCompare() {
   const runs = compareRuns();
+  renderCompareNotice(runs);
   const empty = $("compare-empty");
   const boardNode = $("compare-board");
   const diffNode = $("compare-diff");
@@ -1008,9 +1038,12 @@ function renderResults() {
     const columns = ["Group", "Budget", "Seeds", "Score", showReference ? "Reference" : null, "Differences", "Δ mean [95% CI]"];
     return [
       waiting ? referenceGuide(payload.rows) : null,
-      references.size === 1
-        ? h("p", { class: "table-caption" }, "Each group is judged against ", h("strong", null, [...references][0]), " on paired seeds.")
-        : null,
+      h(
+        "p",
+        { class: "table-caption" },
+        `Score: ${SCORE_MEANING}.`,
+        references.size === 1 ? [" Each group is judged against ", h("strong", null, [...references][0]), " on paired seeds."] : null,
+      ),
       h(
         "div",
         { class: "table-wrap" },
