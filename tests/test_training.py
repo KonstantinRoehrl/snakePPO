@@ -46,6 +46,7 @@ def test_smoke_training_writes_a_complete_run_folder(tmp_path):
     assert [line["update"] for line in lines] == [1, 2, 3, 4]
     assert lines[-1]["env_steps"] == 512
     assert "eval/score_mean" in lines[1] and "eval/score_mean" not in lines[0]
+    assert not any(key.startswith("curriculum/") for line in lines for key in line)
     assert {"loss/policy", "ppo/approx_kl", "ppo/explained_variance", "train/fps"} <= set(lines[0])
     assert load_config(run_dir / "config.yaml") == _smoke_config(tmp_path)
     for name in ("best", "last"):
@@ -54,17 +55,18 @@ def test_smoke_training_writes_a_complete_run_folder(tmp_path):
     assert load_checkpoint(run_dir / "checkpoints" / "last.pt")["update"] == 4
 
 
-def test_finished_run_records_v2_run_info_and_checkpoints(tmp_path):
+def test_finished_run_records_schema_3_run_info_and_checkpoints(tmp_path):
     run_dir = train(_smoke_config(tmp_path, "train.group=g@1"), progress=False)
     info = json.loads((run_dir / "run.json").read_text("utf-8"))
-    assert info["schema_version"] == 2
+    assert info["schema_version"] == 3
     assert info["status"] == "finished"
     assert info["total_updates"] == 4
     assert info["group"] == "g@1"
     assert info["resumed"] == []
     last = load_checkpoint(run_dir / "checkpoints" / "last.pt")
-    assert last["schema_version"] == 2 and last["update"] == 4 and last["env_steps"] == 512
+    assert last["schema_version"] == 3 and last["update"] == 4 and last["env_steps"] == 512
     assert {"best_eval", "wall_time", "rng", "env"} <= last.keys()
+    assert "curriculum" not in last  # only runs with curriculum.grow on store it
     assert last["best_eval"] == max(
         line["eval/score_mean"] for line in _metric_lines(run_dir) if "eval/score_mean" in line
     )

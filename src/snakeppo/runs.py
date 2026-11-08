@@ -1,11 +1,12 @@
 """Run folders: layout, ``run.json``, the ``metrics.jsonl`` contract, status and checkpoints.
 
-Layout (schema version 2)::
+Layout (schema version 3)::
 
     <runs_dir>/<YYYY-MM-DD_HHMMSS>_<name>_seed<k>/
         run.json  config.yaml  metrics.jsonl  tb/  checkpoints/{best,last}.pt
 
-Readers accept schema-1 folders too; their status is inferred (see :func:`derive_status`).
+Readers accept schema-1 and schema-2 folders too; a schema-1 status is inferred (see
+:func:`derive_status`). Schema 2 and 3 runs can be resumed (:data:`RESUMABLE_SCHEMAS`).
 """
 
 from __future__ import annotations
@@ -29,7 +30,9 @@ from torch.utils.tensorboard import SummaryWriter
 
 from snakeppo.config import Config, load_config, total_updates
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
+# Schemas whose run folders and checkpoints hold everything an exact resume needs.
+RESUMABLE_SCHEMAS = (2, 3)
 RUN_INFO_FILE = "run.json"
 CONFIG_FILE = "config.yaml"
 METRICS_FILE = "metrics.jsonl"
@@ -262,9 +265,9 @@ def derive_status(
 ) -> str:
     """One of :data:`RUN_STATUSES`.
 
-    Schema 2: the stored status, reported as ``stalled`` when it says ``running`` but nothing
-    was written for longer than :func:`stall_window`. Schema 1 stored no status: ``finished``
-    when the last update reached the run's total, otherwise ``unknown``.
+    Schema 2 and later: the stored status, reported as ``stalled`` when it says ``running`` but
+    nothing was written for longer than :func:`stall_window`. Schema 1 stored no status:
+    ``finished`` when the last update reached the run's total, otherwise ``unknown``.
     """
     if "status" not in info:
         last = metrics[-1]["update"] if metrics else 0
@@ -334,8 +337,12 @@ def save_checkpoint(
     wall_time: float,
     rng: Mapping[str, Any],
     env: Mapping[str, Any],
+    curriculum: Mapping[str, Any] | None = None,
 ) -> None:
-    """Write a schema-2 checkpoint atomically, so a Ctrl+C mid-save never leaves half a file."""
+    """Write a checkpoint atomically, so a Ctrl+C mid-save never leaves half a file.
+
+    ``curriculum`` is stored only when given (a run with ``curriculum.grow`` on).
+    """
     state = {
         "schema_version": SCHEMA_VERSION,
         "model": model.state_dict(),
@@ -348,11 +355,13 @@ def save_checkpoint(
         "rng": dict(rng),
         "env": dict(env),
     }
+    if curriculum is not None:
+        state["curriculum"] = dict(curriculum)
     replace_atomically(path, lambda temp: torch.save(state, temp))
 
 
 def load_checkpoint(path: str | Path, map_location: str | torch.device = "cpu") -> dict[str, Any]:
-    """Returns the dict ``save_checkpoint`` wrote (schema-1 files lack the schema-2 keys)."""
+    """Returns the dict ``save_checkpoint`` wrote (schema-1 files lack every resume key)."""
     return torch.load(path, map_location=map_location, weights_only=True)
 
 
