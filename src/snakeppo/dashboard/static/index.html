@@ -1,0 +1,146 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>snakePPO dashboard</title>
+    <script>
+      // Apply a remembered light/dark choice before the first paint; app.js owns the toggle.
+      try {
+        const theme = localStorage.getItem("snakeppo.dashboard.theme");
+        if (theme === "light" || theme === "dark") document.documentElement.dataset.theme = theme;
+      } catch {
+        // Storage can be unavailable (private windows, blocked cookies): follow the system.
+      }
+    </script>
+    <link rel="stylesheet" href="/static/style.css" />
+    <script src="/vendor/plotly.min.js"></script>
+    <script type="module" src="/static/app.js"></script>
+  </head>
+  <body>
+    <header class="app-header">
+      <button
+        type="button"
+        class="button sidebar-toggle"
+        id="sidebar-toggle"
+        aria-controls="sidebar"
+        aria-expanded="false"
+      >
+        <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M5 3h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2Z" />
+          <path d="M9 3v18" />
+        </svg>
+        <span id="sidebar-toggle-label">Runs</span>
+      </button>
+      <span class="brand">snakePPO</span>
+      <span class="brand-folder" id="run-summary" aria-live="polite"></span>
+      <div class="header-end">
+        <fieldset class="segmented" id="theme-control">
+          <legend>Colour theme</legend>
+          <label><input type="radio" name="theme" value="system" checked /><span>System</span></label>
+          <label><input type="radio" name="theme" value="light" /><span>Light</span></label>
+          <label><input type="radio" name="theme" value="dark" /><span>Dark</span></label>
+        </fieldset>
+      </div>
+    </header>
+
+    <div class="layout">
+      <aside class="sidebar" id="sidebar" aria-label="Runs">
+        <form class="filters" id="filters" role="search" aria-label="Filter runs">
+          <label class="field field-wide">
+            <span class="field-label">Search</span>
+            <input
+              class="input"
+              type="search"
+              name="text"
+              placeholder="Run id, name or group"
+              autocomplete="off"
+            />
+          </label>
+          <label class="field">
+            <span class="field-label">Agent</span>
+            <select class="select" name="agent"><option value="">All agents</option></select>
+          </label>
+          <label class="field">
+            <span class="field-label">Group</span>
+            <select class="select" name="group"><option value="">All groups</option></select>
+          </label>
+          <label class="field">
+            <span class="field-label">Status</span>
+            <select class="select" name="status"><option value="">Any status</option></select>
+          </label>
+          <label class="field">
+            <span class="field-label">Switch</span>
+            <select class="select" name="switch"><option value="">Any switch</option></select>
+          </label>
+        </form>
+        <div class="list-meta">
+          <span id="list-count" aria-live="polite">Loading runs</span>
+          <span>
+            <button type="button" class="button button-quiet" id="clear-filters" hidden>
+              Clear filters
+            </button>
+            <button type="button" class="button button-quiet" id="clear-selection" hidden>
+              Clear selection
+            </button>
+          </span>
+        </div>
+        <div id="skipped"></div>
+        <nav class="run-scroll" id="run-scroll" aria-label="Run list">
+          <div id="run-list"></div>
+        </nav>
+      </aside>
+
+      <main class="workspace" id="workspace">
+        <div class="workspace-bar">
+          <div class="tabs" role="tablist" aria-label="Workspace views">
+            <button type="button" class="tab" role="tab" id="tab-live" aria-controls="panel-live" aria-selected="true">
+              Live
+            </button>
+            <button type="button" class="tab" role="tab" id="tab-compare" aria-controls="panel-compare" aria-selected="false" tabindex="-1">
+              Compare<span class="tab-count" id="compare-count"></span>
+            </button>
+            <button type="button" class="tab" role="tab" id="tab-results" aria-controls="panel-results" aria-selected="false" tabindex="-1">
+              Results
+            </button>
+          </div>
+          <div class="view-controls" id="view-controls">
+            <fieldset class="segmented" id="x-control">
+              <legend>X axis</legend>
+            </fieldset>
+            <label class="check" id="group-control">
+              <input type="checkbox" id="group-toggle" />
+              <span>Group seeds</span>
+            </label>
+          </div>
+        </div>
+
+        <div id="banner" role="alert" hidden></div>
+
+        <section class="panel" role="tabpanel" id="panel-live" aria-labelledby="tab-live">
+          <div id="live-header"></div>
+          <div id="live-board"></div>
+        </section>
+
+        <section class="panel" role="tabpanel" id="panel-compare" aria-labelledby="tab-compare" hidden>
+          <div id="compare-empty"></div>
+          <div id="compare-board"></div>
+          <div id="compare-diff"></div>
+        </section>
+
+        <section class="panel" role="tabpanel" id="panel-results" aria-labelledby="tab-results" hidden>
+          <div class="results-bar">
+            <label class="field">
+              <span class="field-label">Reference group</span>
+              <select class="select" id="baseline-picker">
+                <option value="">Auto: newest no-switch group at the same budget</option>
+              </select>
+            </label>
+          </div>
+          <div id="results-error"></div>
+          <div id="results-body"></div>
+        </section>
+      </main>
+    </div>
+  </body>
+</html>

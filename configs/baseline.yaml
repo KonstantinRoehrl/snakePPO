@@ -38,3 +38,5 @@ train:
   name: baseline
   runs_dir: runs
   deterministic: false
+  checkpoint_interval: 10
+  group: null

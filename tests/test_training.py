@@ -8,6 +8,7 @@ import torch
 from snakeppo.agents import build_agent
 from snakeppo.config import EnvConfig, RewardConfig, apply_overrides, load_config
 from snakeppo.evaluation import evaluate
+from snakeppo.ppo import trainer
 from snakeppo.ppo.trainer import train
 from snakeppo.runs import load_checkpoint
 
@@ -50,6 +51,75 @@ def test_smoke_training_writes_a_complete_run_folder(tmp_path):
         checkpoint = load_checkpoint(run_dir / "checkpoints" / f"{name}.pt")
         assert checkpoint["config"]["agent"]["name"] == "cnn"
     assert load_checkpoint(run_dir / "checkpoints" / "last.pt")["update"] == 4
+
+
+def test_finished_run_records_v2_run_info_and_checkpoints(tmp_path):
+    run_dir = train(_smoke_config(tmp_path, "train.group=g@1"), progress=False)
+    info = json.loads((run_dir / "run.json").read_text("utf-8"))
+    assert info["schema_version"] == 2
+    assert info["status"] == "finished"
+    assert info["total_updates"] == 4
+    assert info["group"] == "g@1"
+    assert info["resumed"] == []
+    last = load_checkpoint(run_dir / "checkpoints" / "last.pt")
+    assert last["schema_version"] == 2 and last["update"] == 4 and last["env_steps"] == 512
+    assert {"best_eval", "wall_time", "rng", "env"} <= last.keys()
+    assert last["best_eval"] == max(
+        line["eval/score_mean"] for line in _metric_lines(run_dir) if "eval/score_mean" in line
+    )
+    assert last["wall_time"] >= _metric_lines(run_dir)[-1]["wall_time"]
+    assert last["rng"]["cuda"] is None
+    assert set(last["env"]) >= {"head", "food", "generator"}
+
+
+class _Boom(Exception):
+    pass
+
+
+def _raise_at_update(monkeypatch, update, error):
+    """Make the trainer's metrics logger raise ``error`` right after logging ``update``."""
+    real_log = trainer.MetricsLogger.log
+
+    def log(self, number, env_steps, metrics):
+        real_log(self, number, env_steps, metrics)
+        if number == update:
+            raise error
+
+    monkeypatch.setattr(trainer.MetricsLogger, "log", log)
+
+
+@pytest.mark.parametrize(
+    ("error", "status"), [(KeyboardInterrupt(), "interrupted"), (_Boom(), "failed")]
+)
+def test_an_aborted_run_records_why_and_re_raises(tmp_path, monkeypatch, capsys, error, status):
+    _raise_at_update(monkeypatch, 3, error)
+    with pytest.raises(type(error)):
+        train(_smoke_config(tmp_path), progress=False)
+    (run_dir,) = tmp_path.iterdir()
+    assert json.loads((run_dir / "run.json").read_text("utf-8"))["status"] == status
+    assert load_checkpoint(run_dir / "checkpoints" / "last.pt")["update"] == 2
+    if status == "interrupted":
+        assert f"snakeppo train --resume {run_dir}" in capsys.readouterr().out
+
+
+def test_checkpoint_interval_writes_last_between_evals(tmp_path, monkeypatch):
+    saved = []
+    real_save = trainer.save_checkpoint
+
+    def save(path, **state):
+        saved.append((path.name, state["update"]))
+        real_save(path, **state)
+
+    monkeypatch.setattr(trainer, "save_checkpoint", save)
+    config = _smoke_config(
+        tmp_path,
+        "train.total_env_steps=1280",
+        "train.eval_interval=4",
+        "train.checkpoint_interval=3",
+    )
+    train(config, progress=False)  # 10 updates: evals at 4, 8, 10; interval hits 3, 6, 9
+    assert [u for name, u in saved if name == "last.pt"] == [3, 4, 6, 8, 9, 10]
+    assert {u for name, u in saved if name == "best.pt"} <= {4, 8, 10}
 
 
 def test_same_seed_gives_identical_curves_on_cpu(tmp_path):

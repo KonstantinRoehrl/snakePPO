@@ -1,0 +1,37 @@
+name: Pull request title
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: pr-title-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  conventional-title:
+    name: Require a Conventional Commit pull request title
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Validate the title as a Conventional Commit
+        uses: amannn/action-semantic-pull-request@2252a14e810aa9b85c2d560bd7070c802206ecf6 # v6.1.2
+        with:
+          types: |
+            feat
+            fix
+            perf
+            docs
+            chore
+            ci
+            refactor
+            style
+            test
+            build
+          requireScope: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
