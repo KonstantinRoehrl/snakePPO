@@ -18,6 +18,7 @@ uv run snakeppo eval runs/<run> --render                 # watch the trained age
 - `uv run snakeppo train` — train an agent and write a run folder under `runs/`.
 - `uv run snakeppo eval <run>` — evaluate a run folder or checkpoint; `--render` opens a window.
 - `uv run snakeppo agents` — list the available architectures with their parameter counts.
+- `uv run snakeppo rewards` — list the available reward strategies.
 - `uv run snakeppo compare [runs/…]` — summarise finished runs as a table.
 - `uv run snakeppo train --resume runs/<run>` — continue an interrupted run exactly from its last checkpoint.
 - `uv run snakeppo sweep --seeds 1,2,3 --config <file>` — train one run per seed as one seed group.

@@ -1,0 +1,8 @@
+# Baseline trained on a growing board: a walled 8x8 arena that widens to the full board
+# over curriculum.stages stages.
+# Compare its seed sweep against one of configs/baseline.yaml with snakeppo results
+# (docs/experiments.md, Comparing runs).
+curriculum:
+  grow: board
+train:
+  name: curriculum-board

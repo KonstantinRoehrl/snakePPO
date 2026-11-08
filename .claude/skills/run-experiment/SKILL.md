@@ -5,8 +5,9 @@ description: Use when asked to train an agent or run an experiment.
 
 # Run an experiment
 
-1. Pick a preset from `configs/` (`baseline.yaml`, `tuned.yaml`), or copy one to a new file when
-   the experiment needs several changed values. For a quick check use `configs/smoke.yaml`.
+1. Pick a preset from `configs/` (`baseline.yaml`, `tuned.yaml`, one reward strategy from
+   `configs/rewards/` or one curriculum from `configs/curriculum/`), or copy one to a new file
+   when the experiment needs several changed values. For a quick check use `configs/smoke.yaml`.
 2. Choose a descriptive `--name` and a `--seed`; change single values with
    `--set section.key=value` (repeatable).
 3. Run `uv run snakeppo train --config configs/<preset>.yaml --name <name> --seed <seed>`.

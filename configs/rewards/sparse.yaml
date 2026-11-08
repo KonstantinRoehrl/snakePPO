@@ -1,0 +1,7 @@
+# Baseline with the sparse reward: apples and deaths only, no shaping.
+# Compare its seed sweep against one of configs/baseline.yaml with snakeppo results
+# (docs/experiments.md, Comparing runs).
+reward:
+  strategy: sparse
+train:
+  name: reward-sparse

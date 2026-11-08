@@ -1,0 +1,8 @@
+# Baseline with potential-based shaping on the distance to the food, discounted by
+# ppo.gamma, which leaves the optimal policy unchanged.
+# Compare its seed sweep against one of configs/baseline.yaml with snakeppo results
+# (docs/experiments.md, Comparing runs).
+reward:
+  strategy: potential
+train:
+  name: reward-potential

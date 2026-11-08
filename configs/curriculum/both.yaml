@@ -1,0 +1,7 @@
+# Baseline trained on one ladder that grows the arena and the goal length together.
+# Compare its seed sweep against one of configs/baseline.yaml with snakeppo results
+# (docs/experiments.md, Comparing runs).
+curriculum:
+  grow: both
+train:
+  name: curriculum-both

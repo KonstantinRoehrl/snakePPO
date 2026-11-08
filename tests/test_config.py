@@ -18,6 +18,7 @@ from snakeppo.config import (
     save_config,
     total_updates,
 )
+from snakeppo.results import switch_unit, switches
 
 
 def test_defaults_are_the_vanilla_baseline():
@@ -135,9 +136,22 @@ def test_tuned_preset_turns_every_switch_on():
     assert ppo.target_kl is not None
 
 
-@pytest.mark.parametrize("path", sorted(PRESETS.glob("*.yaml")), ids=lambda p: p.name)
+def _preset_id(path):
+    return path.relative_to(PRESETS).as_posix()
+
+
+@pytest.mark.parametrize("path", sorted(PRESETS.glob("**/*.yaml")), ids=_preset_id)
 def test_every_preset_loads(path):
     load_config(path)
+
+
+@pytest.mark.parametrize("path", sorted(PRESETS.glob("*/*.yaml")), ids=_preset_id)
+def test_reward_and_curriculum_presets_turn_on_one_switch(path):
+    config = load_config(path)
+    assert {switch_unit(key) for key in switches(config)} == {
+        {"rewards": "reward.strategy", "curriculum": "curriculum.grow"}[path.parent.name]
+    }
+    assert config.train.name.startswith(path.parent.name.removesuffix("s"))
 
 
 def test_exponential_entropy_schedule_needs_a_positive_start_coefficient():
