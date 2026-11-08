@@ -14,6 +14,12 @@ switch, and the code defaults are the plain baseline. Start with `docs/architect
 - Verdicts across seed groups: `uv run snakeppo results [--baseline GROUP]`
 - Dashboard: `uv run snakeppo serve [--open]`
 
+## CI
+
+`main` takes PRs only; the ruleset requires the `verify` (Ubuntu and Windows), secret-scan,
+workflow-lint and PR-title checks. PR titles must be Conventional Commits. Workflows pin actions to
+commit SHAs and run `actionlint` and `zizmor`. Optional local secret scan: `uvx pre-commit install`.
+
 ## Layout
 
 - `src/snakeppo/` — the package (module map: `docs/architecture.md`)
