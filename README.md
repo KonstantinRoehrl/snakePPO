@@ -16,8 +16,8 @@ uv run snakeppo eval runs/<run> --render                 # watch the trained age
 ## Commands
 
 - `uv run snakeppo train` — train an agent and write a run folder under `runs/`.
-- `uv run snakeppo eval <run>` — evaluate a run folder or checkpoint; `--render` opens a window.
-- `uv run snakeppo agents` — list the available architectures with their parameter counts.
+- `uv run snakeppo eval <run>` — evaluate a run folder or checkpoint; `--render` opens a window, `--board-size N` plays another board size.
+- `uv run snakeppo agents` — list the available architectures with their parameter counts and whether each plays any board size.
 - `uv run snakeppo rewards` — list the available reward strategies.
 - `uv run snakeppo compare [runs/…]` — summarise finished runs as a table.
 - `uv run snakeppo train --resume runs/<run>` — continue an interrupted run exactly from its last checkpoint.
@@ -37,4 +37,4 @@ uv run ruff check . && uv run ruff format --check . && uv run pytest
 
 - [Architecture](docs/architecture.md) — module map and how the pieces fit.
 - [Experiments](docs/experiments.md) — run folders, the metrics schema, resuming, sweeps, comparing runs and the dashboard.
-- [Extending](docs/extending.md) — adding architectures, switches and observation variants.
+- [Extending](docs/extending.md) — adding architectures (recurrent ones too), switches, reward strategies and observation variants.

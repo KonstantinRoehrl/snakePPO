@@ -1,0 +1,7 @@
+# Baseline with the recurrent network: a cnn-small encoder and a GRU of 256.
+# Compare its seed sweep against one of configs/baseline.yaml with snakeppo results
+# (docs/experiments.md, Comparing runs).
+agent:
+  name: recurrent
+train:
+  name: agent-recurrent

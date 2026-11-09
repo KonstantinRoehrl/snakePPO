@@ -29,6 +29,8 @@ STRATEGY_PARAMETERS = (
     "hunger_penalty",
     "free_space_penalty",
 )
+OBSERVATION_BODIES = ("binary", "order")
+OBSERVATION_VIEWS = ("full", "local")
 
 
 class ConfigError(ValueError):
@@ -109,6 +111,15 @@ class CurriculumConfig:
 
 
 @dataclass
+class ObservationConfig:
+    body: str = "binary"
+    tail: bool = False
+    hunger: bool = False
+    view: str = "full"
+    view_size: int = 11  # read only by view: local
+
+
+@dataclass
 class Config:
     env: EnvConfig = field(default_factory=EnvConfig)
     reward: RewardConfig = field(default_factory=RewardConfig)
@@ -116,6 +127,7 @@ class Config:
     ppo: PPOConfig = field(default_factory=PPOConfig)
     train: TrainConfig = field(default_factory=TrainConfig)
     curriculum: CurriculumConfig = field(default_factory=CurriculumConfig)
+    observation: ObservationConfig = field(default_factory=ObservationConfig)
 
 
 @dataclass(frozen=True)
@@ -292,6 +304,7 @@ def validate(config: Config) -> Config:
         raise ConfigError("train.group must be a non-empty name or null")
     _validate_reward(config.reward)
     _validate_curriculum(config)
+    _validate_observation(config.observation)
     return config
 
 
@@ -336,4 +349,17 @@ def _validate_curriculum(config: Config) -> None:
         raise ConfigError(
             f"curriculum needs (stages - 1) * max_updates ({budget}) below the run's "
             f"{updates} updates, so training ends on the full board"
+        )
+
+
+def _validate_observation(observation: ObservationConfig) -> None:
+    if observation.body not in OBSERVATION_BODIES:
+        raise ConfigError(f"observation.body must be one of {', '.join(OBSERVATION_BODIES)}")
+    if observation.view not in OBSERVATION_VIEWS:
+        raise ConfigError(f"observation.view must be one of {', '.join(OBSERVATION_VIEWS)}")
+    # checked with the full view too, so switching a saved config to local never fails later
+    if observation.view_size < 5 or observation.view_size % 2 == 0:
+        raise ConfigError(
+            "observation.view_size must be an odd number of at least 5, "
+            f"got {observation.view_size}"
         )

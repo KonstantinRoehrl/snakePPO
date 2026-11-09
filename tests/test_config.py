@@ -1,3 +1,4 @@
+import dataclasses
 from pathlib import Path
 
 import pytest
@@ -5,11 +6,14 @@ import yaml
 
 from snakeppo.config import (
     CURRICULUM_GROWTH,
+    OBSERVATION_BODIES,
+    OBSERVATION_VIEWS,
     REWARD_STRATEGIES,
     Config,
     ConfigError,
     CurriculumConfig,
     CurriculumStage,
+    ObservationConfig,
     apply_overrides,
     config_from_dict,
     config_to_dict,
@@ -145,13 +149,25 @@ def test_every_preset_loads(path):
     load_config(path)
 
 
+# The switch every preset in a folder turns on; each observation preset turns on its own key.
+FOLDER_SWITCHES = {
+    "rewards": "reward.strategy",
+    "curriculum": "curriculum.grow",
+    "agents": "agent.name",
+}
+
+
 @pytest.mark.parametrize("path", sorted(PRESETS.glob("*/*.yaml")), ids=_preset_id)
-def test_reward_and_curriculum_presets_turn_on_one_switch(path):
+def test_every_folder_preset_turns_on_one_switch(path):
     config = load_config(path)
-    assert {switch_unit(key) for key in switches(config)} == {
-        {"rewards": "reward.strategy", "curriculum": "curriculum.grow"}[path.parent.name]
-    }
-    assert config.train.name.startswith(path.parent.name.removesuffix("s"))
+    units = {switch_unit(key) for key in switches(config)}
+    assert len(units) == 1, units
+    folder = path.parent.name
+    if folder == "observation":
+        assert units.pop().startswith("observation.")
+    else:
+        assert units == {FOLDER_SWITCHES[folder]}
+    assert config.train.name.startswith(folder.removesuffix("s"))
 
 
 def test_exponential_entropy_schedule_needs_a_positive_start_coefficient():
@@ -294,3 +310,80 @@ def test_overrides_are_validated_together_so_their_order_does_not_matter():
             Config(),
             ["curriculum.max_updates=50", "curriculum.grow=both", "curriculum.max_updates=500"],
         )
+
+
+# ------------------------------------------------------------ observation switches
+def test_observation_defaults_are_the_baseline_and_the_section_comes_last():
+    observation = Config().observation
+    assert observation == ObservationConfig(
+        body="binary", tail=False, hunger=False, view="full", view_size=11
+    )
+    assert OBSERVATION_BODIES == ("binary", "order")
+    assert OBSERVATION_VIEWS == ("full", "local")
+    assert [f.name for f in dataclasses.fields(Config)][-2:] == ["curriculum", "observation"]
+
+
+@pytest.mark.parametrize(
+    ("override", "message"),
+    [
+        ("observation.body=onehot", "observation.body must be one of binary, order"),
+        ("observation.view=global", "observation.view must be one of full, local"),
+        (
+            "observation.view_size=4",
+            "observation.view_size must be an odd number of at least 5, got 4",
+        ),
+        (
+            "observation.view_size=3",
+            "observation.view_size must be an odd number of at least 5, got 3",
+        ),
+        (
+            "observation.view_size=12",
+            "observation.view_size must be an odd number of at least 5, got 12",
+        ),
+        ("observation.tail=1", "observation.tail must be bool, got 1"),
+        ("observation.view_size=7.0", "observation.view_size must be int, got 7.0"),
+    ],
+)
+def test_observation_values_are_validated(override, message):
+    with pytest.raises(ConfigError, match=message):
+        apply_overrides(Config(), [override])
+
+
+def test_view_size_is_checked_even_with_the_full_view():
+    with pytest.raises(ConfigError, match="observation.view_size must be an odd number"):
+        config_from_dict({"observation": {"view": "full", "view_size": 6}})
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        ["observation.body=order"],
+        ["observation.tail=true", "observation.hunger=true"],
+        ["observation.view=local", "observation.view_size=5"],
+        ["observation.view=local", "observation.view_size=31"],
+    ],
+)
+def test_every_meaningful_observation_is_accepted(overrides):
+    config = apply_overrides(Config(), overrides)
+    assert config.observation != ObservationConfig()
+
+
+def test_observation_section_round_trips_through_a_saved_config(tmp_path):
+    config = apply_overrides(
+        Config(),
+        [
+            "observation.body=order",
+            "observation.tail=true",
+            "observation.hunger=true",
+            "observation.view=local",
+            "observation.view_size=7",
+        ],
+    )
+    path = tmp_path / "config.yaml"
+    save_config(config, path)
+    assert load_config(path) == config
+    assert yaml.safe_load(path.read_text(encoding="utf-8"))["observation"]["view_size"] == 7
+
+
+def test_a_config_without_an_observation_section_gets_the_default_observation():
+    assert config_from_dict({"env": {"board_size": 8}}).observation == ObservationConfig()

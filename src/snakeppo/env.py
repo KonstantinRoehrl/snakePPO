@@ -5,6 +5,13 @@ Every env auto-resets: a snake that dies (terminated), starves or reaches its go
 observation and the finished episode's statistics. A curriculum can shrink the playable area to a
 centred walled arena and set a goal length (:meth:`TorchSnakeEnv.set_curriculum`); the tensors
 keep the full board size either way.
+
+The policy observation follows an :class:`~snakeppo.observation.ObservationSpec`; the default is
+the 4-channel binary grid (body, head, food, wall) of the whole board. The tail channel always
+reflects ``body_positions`` after the step: a length-1 snake marks its one cell 1.0, a length-2
+snake marks its tail 1.0 and its head 0.5, and on the step after eating (the tail did not move)
+it shows the current tail. :meth:`TorchSnakeEnv.render_grid` stays the unrotated 4-channel
+display grid whatever the spec.
 """
 
 from __future__ import annotations
@@ -13,6 +20,7 @@ from collections.abc import Mapping, Sequence
 
 import torch
 
+from snakeppo.observation import ObservationSpec, body_order_grid, local_view, tail_grid
 from snakeppo.rewards import ClassicReward, RewardStrategy, StepContext
 
 # Heading index -> (row, col) delta. Index order is clockwise, so +1 turns right.
@@ -20,7 +28,7 @@ DIRECTIONS = ((-1, 0), (0, 1), (1, 0), (0, -1))
 UP, RIGHT, DOWN, LEFT = range(4)
 STRAIGHT, TURN_LEFT, TURN_RIGHT = range(3)
 NUM_ACTIONS = 3
-NUM_CHANNELS = 4  # body, head, food, wall ring
+NUM_CHANNELS = 4  # of the display grid: body, head, food, wall ring
 # Why an episode ended, per env in ``info["end_reason"]``; END_NONE where it did not end.
 END_NONE, END_WALL, END_BODY, END_STARVED, END_GOAL = range(5)
 END_REASONS = ("wall", "body", "starved", "goal")  # END_REASONS[code - 1]
@@ -49,13 +57,18 @@ class TorchSnakeEnv:
         reward: RewardStrategy | None = None,
         device: str | torch.device = "cpu",
         seed: int | None = None,
+        observation: ObservationSpec | None = None,
     ) -> None:
         self.num_envs = num_envs
         self.board_size = board_size
         self.starvation_steps = starvation_steps
         self.reward = ClassicReward() if reward is None else reward
         self.device = torch.device(device)
-        self.obs_shape = (NUM_CHANNELS, board_size, board_size)
+        self.observation = ObservationSpec() if observation is None else observation
+        self.obs_channels = self.observation.channels
+        side = self.observation.size(board_size)
+        self.obs_shape = (len(self.obs_channels), side, side)
+        self.obs_is_binary = self.observation.is_binary  # every value 0 or 1
         self.max_len = (board_size - 2) ** 2
 
         self.generator = torch.Generator(device=self.device)
@@ -86,7 +99,7 @@ class TorchSnakeEnv:
 
     # ----------------------------------------------------------------- public API
     def reset(self) -> torch.Tensor:
-        """Reset every env; returns the policy observation (N, 4, S, S) float32."""
+        """Reset every env; returns the policy observation (N, *obs_shape) float32."""
         self._reset_envs(torch.ones(self.num_envs, dtype=torch.bool, device=self.device))
         return self.observe()
 
@@ -193,19 +206,44 @@ class TorchSnakeEnv:
         return obs, reward, terminated, truncated, info
 
     def observe(self) -> torch.Tensor:
-        """Policy observation: the grid rotated so every snake faces up."""
+        """Policy observation (N, *obs_shape): the spec's channels, rotated so every snake faces up.
+
+        The default spec is exactly :meth:`render_grid` rotated. The switches change the body
+        channel to :meth:`render_body_order`, append the tail channel, crop the local view
+        around the head, and append the hunger plane at the cropped size, in that order.
+        """
+        spec = self.observation
         grid = self.render_grid()
+        if spec.body == "order":
+            grid[:, 0] = self.render_body_order()
+        if spec.tail:
+            tail = tail_grid(self.body_positions, self.snake_len, self.board_size)
+            grid = torch.cat([grid, tail.unsqueeze(1)], dim=1)
+        if spec.view_size is not None:
+            grid = local_view(grid, self.head, self.food, spec.view_size)
+        if spec.hunger:
+            hunger = self.steps_since_food.float() / self.starvation_steps
+            plane = hunger.view(-1, 1, 1, 1).expand(-1, 1, *grid.shape[2:])
+            grid = torch.cat([grid, plane], dim=1)
         rotations = torch.stack([torch.rot90(grid, k=k, dims=(2, 3)) for k in range(4)], dim=1)
         return rotations[self._env_ids, self.heading]
 
     def render_grid(self) -> torch.Tensor:
         """Unrotated grid (N, 4, S, S) float32 for display: body, head, food, walls."""
-        grid = torch.zeros((self.num_envs, *self.obs_shape), device=self.device)
+        size = self.board_size
+        grid = torch.zeros((self.num_envs, NUM_CHANNELS, size, size), device=self.device)
         grid[:, 0] = self.body.float()
         grid[self._env_ids, 1, self.head[:, 0], self.head[:, 1]] = 1.0
         grid[self._env_ids, 2, self.food[:, 0], self.food[:, 1]] = 1.0
         grid[:, 3] = self._walls
         return grid
+
+    def render_body_order(self) -> torch.Tensor:
+        """Unrotated (N, S, S) float32 body order (head 1.0 down to the tail's 0.1), for display.
+
+        Independent of ``observation.body``: the viewer reads it to shade the body.
+        """
+        return body_order_grid(self.body_positions, self.snake_len, self.board_size)
 
     def place_snake(
         self,

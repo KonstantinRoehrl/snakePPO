@@ -1,0 +1,9 @@
+# Baseline with the recurrent network on an LSTM of 256 instead of a GRU.
+# Compare its seed sweep against one of configs/baseline.yaml with snakeppo results
+# (docs/experiments.md, Comparing runs).
+agent:
+  name: recurrent
+  kwargs:
+    cell: lstm
+train:
+  name: agent-recurrent-lstm

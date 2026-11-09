@@ -1,9 +1,15 @@
-"""The PPO training loop: fixed-window rollouts, GAE, clipped updates, periodic eval."""
+"""The PPO training loop: fixed-window rollouts, GAE, clipped updates, periodic eval.
+
+A recurrent policy carries a hidden state ``(N, K, H)`` through the rollout, zeroed where an
+episode starts and after a curriculum promotion's reset; its update replays groups of whole envs
+from the rollout's start state instead of shuffling single steps.
+"""
 
 from __future__ import annotations
 
 import math
 import time
+from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -11,12 +17,16 @@ from pathlib import Path
 import torch
 from tqdm import tqdm
 
-from snakeppo.agents import build_agent, count_parameters
+from snakeppo.agents import RecurrentPolicy, count_parameters, episode_starts
 from snakeppo.agents.networks import PolicyNetwork
 from snakeppo.builders import (
     EVAL_SEED_OFFSET,
     capture_rng_state,
+    load_policy,
     make_env,
+    make_policy,
+    observation_record,
+    recurrent_minibatches,
     resolve_device,
     restore_rng_state,
     seed_everything,
@@ -59,13 +69,22 @@ from snakeppo.runs import (
 
 
 class RolloutBuffer:
-    """Preallocated (T, N) storage; observations are kept as uint8 and widened on read."""
+    """Preallocated (T, N) storage; observations are stored as ``obs_dtype`` and widened on read.
+
+    ``uint8`` is exact only for an observation whose every value is 0 or 1 (the default one);
+    the trainer passes ``float32`` for any other, so fractions are never truncated.
+    """
 
     def __init__(
-        self, steps: int, num_envs: int, obs_shape: tuple[int, ...], device: torch.device
+        self,
+        steps: int,
+        num_envs: int,
+        obs_shape: tuple[int, ...],
+        device: torch.device,
+        obs_dtype: torch.dtype = torch.uint8,
     ) -> None:
         shape = (steps, num_envs)
-        self.obs = torch.zeros((*shape, *obs_shape), dtype=torch.uint8, device=device)
+        self.obs = torch.zeros((*shape, *obs_shape), dtype=obs_dtype, device=device)
         self.actions = torch.zeros(shape, dtype=torch.long, device=device)
         self.log_probs = torch.zeros(shape, device=device)
         self.values = torch.zeros(shape, device=device)
@@ -93,7 +112,7 @@ def train(config: Config, *, progress: bool = True) -> Path:
     env = _make_train_env(config, device)
     curriculum = _make_curriculum(config, env)
     env_cfg = config.env
-    model = build_agent(config.agent.name, env_cfg.board_size, **config.agent.kwargs).to(device)
+    model = make_policy(config).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=config.ppo.lr, eps=1e-5)
 
     run_dir = create_run_dir(config.train.runs_dir, config.train.name, env_cfg.seed)
@@ -106,11 +125,15 @@ def train(config: Config, *, progress: bool = True) -> Path:
         device=str(device),
         total_updates=total_updates(config),
         group=config.train.group,
+        observation=observation_record(config),
     )
     print(f"Training '{config.agent.name}' on {device}; writing run folder {run_dir}")
     obs = env.reset()
+    hidden = None
+    if isinstance(model, RecurrentPolicy):
+        hidden = model.initial_state(env_cfg.num_envs, device)
     session = _Session(run_dir, config, device, env, model, optimizer, curriculum)
-    return _run(session, obs, Progress(), progress=progress)
+    return _run(session, obs, hidden, Progress(), progress=progress)
 
 
 def _make_train_env(config: Config, device: torch.device) -> TorchSnakeEnv:
@@ -118,6 +141,7 @@ def _make_train_env(config: Config, device: torch.device) -> TorchSnakeEnv:
     return make_env(
         env_cfg,
         config.reward,
+        config.observation,
         num_envs=env_cfg.num_envs,
         device=device,
         seed=env_cfg.seed,
@@ -152,7 +176,9 @@ def resume(run_dir: str | Path, *, progress: bool = True) -> Path:
     """Continue an interrupted, failed or stalled run in place from ``checkpoints/last.pt``.
 
     The continuation is exact on CPU: the same metrics an uninterrupted run would have logged,
-    apart from ``wall_time`` and ``train/fps``. A schema-2 run continues as schema 3.
+    apart from ``wall_time`` and ``train/fps``. A schema-2 or 3 run continues as schema 4: its
+    config has no observation section and its checkpoints no observation record, so it loads
+    with the default observation, which is the one it trained on.
     """
     run_dir = Path(run_dir)
     if not (run_dir / RUN_INFO_FILE).is_file():
@@ -197,8 +223,12 @@ def resume(run_dir: str | Path, *, progress: bool = True) -> Path:
         curriculum.load_state_dict(checkpoint["curriculum"])
         env.set_curriculum(curriculum.current.arena, curriculum.current.goal)
     env.load_state_dict(checkpoint["env"])
-    model = build_agent(config.agent.name, env_cfg.board_size, **config.agent.kwargs).to(device)
-    model.load_state_dict(checkpoint["model"])
+    model = load_policy(checkpoint, config, last).to(device)
+    hidden = None
+    if isinstance(model, RecurrentPolicy):
+        if "policy_state" not in checkpoint:
+            raise ResumeError(f"{last} has no policy_state to continue a recurrent run from")
+        hidden = checkpoint["policy_state"].to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=config.ppo.lr, eps=1e-5)
     optimizer.load_state_dict(checkpoint["optimizer"])
 
@@ -210,6 +240,7 @@ def resume(run_dir: str | Path, *, progress: bool = True) -> Path:
         status="running",
         resumed=[*record.info["resumed"], stamp],
         schema_version=SCHEMA_VERSION,
+        observation=observation_record(config),
     )
     print(
         f"Resuming {run_dir} after update {update} of {record.total_updates} on {device} "
@@ -220,7 +251,7 @@ def resume(run_dir: str | Path, *, progress: bool = True) -> Path:
     start = Progress(update, env_steps, checkpoint["best_eval"], checkpoint["wall_time"])
     session = _Session(run_dir, config, device, env, model, optimizer, curriculum)
     first_new_step = env_steps + config.ppo.rollout_steps * env_cfg.num_envs
-    return _run(session, env.observe(), start, progress=progress, purge_step=first_new_step)
+    return _run(session, env.observe(), hidden, start, progress=progress, purge_step=first_new_step)
 
 
 @dataclass(frozen=True)
@@ -239,15 +270,19 @@ class _Session:
 def _run(
     session: _Session,
     obs: torch.Tensor,
+    hidden: torch.Tensor | None,
     start: Progress,
     *,
     progress: bool,
     purge_step: int | None = None,
 ) -> Path:
-    """Loop from ``start.update + 1`` to the last update, recording the outcome in run.json."""
+    """Loop from ``start.update + 1`` to the last update, recording the outcome in run.json.
+
+    ``hidden`` is a recurrent model's state for ``obs`` (N, K, H); ``None`` for feed-forward.
+    """
     run_dir = session.run_dir
     try:
-        best_eval = _loop(session, obs, start, progress=progress, purge_step=purge_step)
+        best_eval = _loop(session, obs, hidden, start, progress=progress, purge_step=purge_step)
     except KeyboardInterrupt:
         update_run_info(run_dir, status="interrupted")
         print(f"Interrupted. Continue with: snakeppo train --resume {run_dir}")
@@ -263,6 +298,7 @@ def _run(
 def _loop(
     session: _Session,
     obs: torch.Tensor,
+    hidden: torch.Tensor | None,
     start: Progress,
     *,
     progress: bool,
@@ -274,10 +310,14 @@ def _loop(
     steps, n = ppo.rollout_steps, env_cfg.num_envs
     batch_size = steps * n
     num_updates = total_updates(config)
-    buffer = RolloutBuffer(steps, n, env.obs_shape, device)
+    obs_dtype = torch.uint8 if env.obs_is_binary else torch.float32
+    buffer = RolloutBuffer(steps, n, env.obs_shape, device, obs_dtype)
     env_steps, best_eval = start.env_steps, start.best_eval
     checkpoints = run_dir / CHECKPOINT_DIR
     config_dict = config_to_dict(config)
+    observation = observation_record(config)
+    groups = recurrent_minibatches(config)
+    no_starts = torch.zeros(n, dtype=torch.bool, device=device)
 
     with MetricsLogger(run_dir, wall_time_offset=start.wall_time, purge_step=purge_step) as logger:
         bar = tqdm(
@@ -300,11 +340,15 @@ def _loop(
 
             started = time.perf_counter()
             finished_scores, finished_lengths, finished_returns = [], [], []
+            rollout_start = hidden  # a recurrent update replays every env from here
             with torch.no_grad():
                 for t in range(steps):
-                    actions, log_probs, values = model.act(obs)
+                    if hidden is None:
+                        actions, log_probs, values = model.act(obs)
+                    else:
+                        actions, log_probs, values, hidden = model.act(obs, hidden, no_starts)
                     next_obs, reward, terminated, truncated, info = env.step(actions)
-                    buffer.obs[t] = obs.to(torch.uint8)
+                    buffer.obs[t] = obs.to(buffer.obs.dtype)
                     buffer.actions[t] = actions
                     buffer.log_probs[t] = log_probs
                     buffer.values[t] = values
@@ -313,7 +357,14 @@ def _loop(
                     buffer.done[t] = info["done"]
                     buffer.next_values[t] = 0.0
                     if truncated.any():
-                        _, final_values = model(info["final_obs"][truncated])
+                        if hidden is None:
+                            _, final_values = model(info["final_obs"][truncated])
+                        else:  # from the state that produced this step, before its reset below
+                            _, final_values, _ = model(
+                                info["final_obs"][truncated],
+                                hidden[truncated],
+                                no_starts[truncated],
+                            )
                         buffer.next_values[t, truncated] = final_values
                     done = info["done"]
                     if done.any():
@@ -321,7 +372,12 @@ def _loop(
                         finished_lengths.append(info["episode_length"][done].float())
                         finished_returns.append(info["episode_return"][done])
                     obs = next_obs
-                _, last_values = model(obs)
+                    if hidden is not None:  # the next step starts a new episode where done
+                        hidden = hidden.masked_fill(done[:, None, None], 0.0)
+                if hidden is None:
+                    _, last_values = model(obs)
+                else:
+                    _, last_values, _ = model(obs, hidden, no_starts)
                 # next state of a non-final step is the following step's observation
                 not_done = ~buffer.done
                 following = torch.cat([buffer.values[1:], last_values.unsqueeze(0)])
@@ -352,10 +408,11 @@ def _loop(
             grad_norm_sum, minibatches, epochs_run, stop = 0.0, 0, 0, False
             for _ in range(ppo.update_epochs):
                 epochs_run += 1
-                order = torch.randperm(batch_size, device=device)
-                for start_index in range(0, batch_size, ppo.minibatch_size):
-                    mb = order[start_index : start_index + ppo.minibatch_size]
-                    logits, new_values = model(flat_obs[mb].float())
+                if rollout_start is None:
+                    batches = _shuffled_steps(model, flat_obs, ppo.minibatch_size, device)
+                else:
+                    batches = _env_groups(model, buffer, rollout_start, groups, device)
+                for mb, logits, new_values in batches:
                     dist = torch.distributions.Categorical(logits=logits)
                     out = ppo_loss(
                         dist.log_prob(flat_actions[mb]),
@@ -427,6 +484,8 @@ def _loop(
                     stage = session.curriculum.current
                     env.set_curriculum(stage.arena, stage.goal)
                     obs = env.reset()  # partial episodes are dropped, never counted
+                    if hidden is not None:
+                        hidden = torch.zeros_like(hidden)
 
             is_eval = update % config.train.eval_interval == 0 or update == num_updates
             improved = False
@@ -434,6 +493,7 @@ def _loop(
                 stats = evaluate(
                     model,
                     env_cfg,
+                    config.observation,
                     episodes=config.train.eval_episodes,
                     device=device,
                     seed=env_cfg.seed + EVAL_SEED_OFFSET,
@@ -455,10 +515,53 @@ def _loop(
                     "wall_time": logger.elapsed(),
                     "rng": capture_rng_state(device),
                     "env": env.state_dict(),
+                    "observation": observation,
                 }
                 if session.curriculum is not None:
                     state["curriculum"] = session.curriculum.state_dict()
+                if hidden is not None:
+                    state["policy_state"] = hidden.cpu()
                 save_checkpoint(checkpoints / "last.pt", **state)
                 if improved:
                     save_checkpoint(checkpoints / "best.pt", **state)
     return best_eval
+
+
+def _shuffled_steps(
+    model: PolicyNetwork, flat_obs: torch.Tensor, minibatch_size: int, device: torch.device
+) -> Iterator[tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
+    """One epoch of feed-forward minibatches of shuffled single steps.
+
+    Yields ``(index, logits, values)``; ``index`` picks the minibatch's entries of the flattened
+    (T * N) rollout.
+    """
+    batch_size = len(flat_obs)
+    order = torch.randperm(batch_size, device=device)
+    for start_index in range(0, batch_size, minibatch_size):
+        mb = order[start_index : start_index + minibatch_size]
+        logits, values = model(flat_obs[mb].float())
+        yield mb, logits, values
+
+
+def _env_groups(
+    model: RecurrentPolicy,
+    buffer: RolloutBuffer,
+    start_state: torch.Tensor,
+    groups: int,
+    device: torch.device,
+) -> Iterator[tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
+    """One epoch of recurrent minibatches: ``groups`` shuffled groups of whole envs.
+
+    Each group replays its envs' whole rollout from their start state, resetting the state where
+    an episode starts, and yields ``(index, logits, values)`` over every step of those envs;
+    ``index`` picks the same entries of the flattened (T * N) rollout.
+    """
+    steps, num_envs = buffer.done.shape
+    starts = episode_starts(buffer.done)
+    order = torch.randperm(num_envs, device=device)
+    step_offsets = torch.arange(steps, device=device)[:, None] * num_envs
+    for envs in order.view(groups, -1):
+        logits, values, _ = model.unroll(
+            buffer.obs[:, envs].float(), start_state[envs], starts[:, envs]
+        )
+        yield (step_offsets + envs).reshape(-1), logits.flatten(0, 1), values.flatten(0, 1)

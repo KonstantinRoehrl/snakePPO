@@ -1,4 +1,8 @@
-"""Pygame window showing up to four games side by side; pygame is imported only when used."""
+"""Pygame window showing up to four games side by side; pygame is imported only when used.
+
+The body is shaded by its body order (1.0 at the head down to ``BODY_ORDER_TAIL`` at the tail),
+from bright green next to the head to dark green at the tail, whatever the policy observes.
+"""
 
 from __future__ import annotations
 
@@ -7,18 +11,31 @@ from typing import Any
 
 import torch
 
+from snakeppo.observation import BODY_ORDER_TAIL
+
 MAX_GAMES = 4
 PADDING = 10
 HEADER_HEIGHT = 40
-WALL, FOOD, HEAD, BODY, EMPTY, GRID_LINE = (
+WALL, FOOD, HEAD, EMPTY, GRID_LINE = (
     (50, 50, 50),
     (255, 50, 50),
     (120, 255, 120),
-    (50, 200, 50),
     (0, 0, 0),
     (30, 30, 30),
 )
+BODY_NEAR_HEAD = (50, 200, 50)  # body order 1.0
+BODY_AT_TAIL = (20, 80, 20)  # body order BODY_ORDER_TAIL
 TEXT = (255, 255, 255)
+
+
+def body_colour(order: float) -> tuple[int, int, int]:
+    """Body colour at a body-order value, linear from the head's 1.0 to the tail, clamped."""
+    fraction = min(max((1.0 - order) / (1.0 - BODY_ORDER_TAIL), 0.0), 1.0)
+    red, green, blue = (
+        round(near + (tail - near) * fraction)
+        for near, tail in zip(BODY_NEAR_HEAD, BODY_AT_TAIL, strict=True)
+    )
+    return red, green, blue
 
 
 class Viewer:
@@ -41,8 +58,12 @@ class Viewer:
         self._clock = pygame.time.Clock()
         self.is_open = True
 
-    def draw(self, grids: torch.Tensor, scores: Sequence[float]) -> bool:
-        """Draw unrotated grids (N, 4, S, S); returns False once the window has been closed."""
+    def draw(self, grids: torch.Tensor, scores: Sequence[float], body_order: torch.Tensor) -> bool:
+        """Draw unrotated grids (N, 4, S, S) with their body order (N, S, S).
+
+        ``body_order`` comes from ``env.render_body_order()``. Returns False once the window has
+        been closed.
+        """
         pygame = self._pygame
         if not self.is_open:
             return False
@@ -51,6 +72,7 @@ class Viewer:
                 self.close()
                 return False
         cells = grids[: self.num_games].detach().cpu().numpy() > 0
+        orders = body_order[: self.num_games].detach().cpu().numpy()
         board_px = self.board_size * self.cell_size
         self._screen.fill(EMPTY)
         for game, (body, head, food, wall) in enumerate(cells):
@@ -67,7 +89,7 @@ class Viewer:
                     elif head[row, col]:
                         color = HEAD
                     elif body[row, col]:
-                        color = BODY
+                        color = body_colour(float(orders[game, row, col]))
                     else:
                         color = EMPTY
                     rect = pygame.Rect(

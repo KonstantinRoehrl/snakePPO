@@ -1,0 +1,8 @@
+# Baseline with the body-order observation: each body cell shows its place along the snake,
+# from 1.0 at the head down to 0.1 at the tail, instead of 1.0.
+# Compare its seed sweep against one of configs/baseline.yaml with snakeppo results
+# (docs/experiments.md, Comparing runs).
+observation:
+  body: order
+train:
+  name: observation-body-order

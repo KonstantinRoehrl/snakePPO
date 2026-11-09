@@ -1,12 +1,15 @@
 """Run folders: layout, ``run.json``, the ``metrics.jsonl`` contract, status and checkpoints.
 
-Layout (schema version 3)::
+Layout (schema version 4)::
 
     <runs_dir>/<YYYY-MM-DD_HHMMSS>_<name>_seed<k>/
         run.json  config.yaml  metrics.jsonl  tb/  checkpoints/{best,last}.pt
 
-Readers accept schema-1 and schema-2 folders too; a schema-1 status is inferred (see
-:func:`derive_status`). Schema 2 and 3 runs can be resumed (:data:`RESUMABLE_SCHEMAS`).
+Schema 4 adds the ``observation`` record (channel names, spatial size, view) to ``run.json`` and
+every checkpoint, and a recurrent run's hidden state (``policy_state``) to its checkpoints.
+Readers accept schema-1 to 3 folders too; a schema-1 status is inferred (see
+:func:`derive_status`), and a folder without an ``observation`` record trained on the default
+observation. Schema 2, 3 and 4 runs can be resumed (:data:`RESUMABLE_SCHEMAS`).
 """
 
 from __future__ import annotations
@@ -30,9 +33,9 @@ from torch.utils.tensorboard import SummaryWriter
 
 from snakeppo.config import Config, load_config, total_updates
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 # Schemas whose run folders and checkpoints hold everything an exact resume needs.
-RESUMABLE_SCHEMAS = (2, 3)
+RESUMABLE_SCHEMAS = (2, 3, 4)
 RUN_INFO_FILE = "run.json"
 CONFIG_FILE = "config.yaml"
 METRICS_FILE = "metrics.jsonl"
@@ -106,6 +109,7 @@ def write_run_info(
     device: str,
     total_updates: int,
     group: str | None,
+    observation: Mapping[str, Any],
 ) -> dict[str, Any]:
     info = {
         "schema_version": SCHEMA_VERSION,
@@ -118,6 +122,7 @@ def write_run_info(
         "status": "running",
         "total_updates": total_updates,
         "group": group,
+        "observation": dict(observation),
         "resumed": [],
     }
     write_json_atomic(run_dir / RUN_INFO_FILE, info)
@@ -337,11 +342,15 @@ def save_checkpoint(
     wall_time: float,
     rng: Mapping[str, Any],
     env: Mapping[str, Any],
+    observation: Mapping[str, Any],
     curriculum: Mapping[str, Any] | None = None,
+    policy_state: torch.Tensor | None = None,
 ) -> None:
     """Write a checkpoint atomically, so a Ctrl+C mid-save never leaves half a file.
 
-    ``curriculum`` is stored only when given (a run with ``curriculum.grow`` on).
+    ``observation`` is the run's observation record, checked before the weights are loaded;
+    ``curriculum`` is stored only when given (a run with ``curriculum.grow`` on), and so is
+    ``policy_state``: a recurrent run's hidden state (N, K, H) on CPU, the next rollout's start.
     """
     state = {
         "schema_version": SCHEMA_VERSION,
@@ -354,9 +363,12 @@ def save_checkpoint(
         "wall_time": wall_time,
         "rng": dict(rng),
         "env": dict(env),
+        "observation": dict(observation),
     }
     if curriculum is not None:
         state["curriculum"] = dict(curriculum)
+    if policy_state is not None:
+        state["policy_state"] = policy_state
     replace_atomically(path, lambda temp: torch.save(state, temp))
 
 

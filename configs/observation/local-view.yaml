@@ -1,0 +1,8 @@
+# Baseline with the local view: an 11x11 head-centred crop (observation.view_size) instead of
+# the whole board; off-board cells are wall and food outside the crop shows on its edge.
+# Compare its seed sweep against one of configs/baseline.yaml with snakeppo results
+# (docs/experiments.md, Comparing runs).
+observation:
+  view: local
+train:
+  name: observation-local-view

@@ -6,6 +6,7 @@ from datetime import datetime
 
 import pytest
 
+from snakeppo.builders import observation_record
 from snakeppo.config import Config, apply_overrides, save_config
 from snakeppo.dashboard.api import json_safe
 from snakeppo.dashboard.server import make_server, serve
@@ -23,7 +24,14 @@ def _run(runs_dir, group, seed, *overrides, status="finished", evals=(1.0, 2.0, 
     run_dir = create_run_dir(runs_dir, group or "solo", seed, now=datetime(2026, 11, 7, 9, 0))
     save_config(config, run_dir / "config.yaml")
     write_run_info(
-        run_dir, name="x", agent="cnn", param_count=1, device="cpu", total_updates=3, group=group
+        run_dir,
+        name="x",
+        agent="cnn",
+        param_count=1,
+        device="cpu",
+        total_updates=3,
+        group=group,
+        observation=observation_record(config),
     )
     update_run_info(run_dir, status=status)
     with MetricsLogger(run_dir, tensorboard=False) as logger:

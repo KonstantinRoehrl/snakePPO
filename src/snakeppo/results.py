@@ -36,12 +36,15 @@ BOOKKEEPING_KEYS = frozenset(
 # Keys that set the budget and how runs are measured: shown as the budget, never a switch.
 PROTOCOL_KEYS = ("train.total_env_steps", "train.eval_interval", "train.eval_episodes")
 # A selector and the keys only it reads are one switch: changing a strategy together with its
-# own coefficient is still one experiment.
+# own coefficient, an architecture with its kwargs or a local view with its size is still one
+# experiment.
 SELECTOR_KEYS = {
     "reward.strategy": tuple(f"reward.{name}" for name in STRATEGY_PARAMETERS),
     "curriculum.grow": tuple(
         f"curriculum.{f.name}" for f in fields(CurriculumConfig) if f.name != "grow"
     ),
+    "agent.name": ("agent.kwargs",),
+    "observation.view": ("observation.view_size",),
 }
 SCORE_EVALS = 3
 MIN_PAIRED_SEEDS = 3

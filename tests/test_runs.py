@@ -32,7 +32,15 @@ from snakeppo.runs import (
 )
 
 NOW = datetime(2026, 11, 7, 9, 30, 0)
-RUN_INFO = {"agent": "cnn", "param_count": 10, "device": "cpu", "total_updates": 3, "group": None}
+RECORD = {"channels": ["body", "head", "food", "wall"], "size": 16, "view": "full"}
+RUN_INFO = {
+    "agent": "cnn",
+    "param_count": 10,
+    "device": "cpu",
+    "total_updates": 3,
+    "group": None,
+    "observation": RECORD,
+}
 
 
 def _fake_run(tmp_path, name="demo", seed=3, evals=(1.0, 4.0, 2.0)):
@@ -59,6 +67,7 @@ def test_run_dir_name_is_unique_and_has_checkpoint_folder(tmp_path):
 
 def test_run_info_records_schema_identity_and_v2_fields(tmp_path):
     run_dir = create_run_dir(tmp_path, "demo", 3, now=NOW)
+    local = {"channels": ["body", "head", "food", "wall", "hunger"], "size": 11, "view": "local"}
     info = write_run_info(
         run_dir,
         name="demo",
@@ -67,9 +76,11 @@ def test_run_info_records_schema_identity_and_v2_fields(tmp_path):
         device="cpu",
         total_updates=40,
         group="demo@20261107-093000",
+        observation=local,
     )
     assert json.loads((run_dir / "run.json").read_text("utf-8")) == info == read_run_info(run_dir)
-    assert info["schema_version"] == SCHEMA_VERSION == 3
+    assert info["schema_version"] == SCHEMA_VERSION == 4
+    assert info["observation"] == local
     assert {"name", "created", "git_sha", "agent", "param_count", "device"} <= info.keys()
     assert info["status"] == "running"
     assert info["total_updates"] == 40
@@ -216,9 +227,11 @@ def test_checkpoint_round_trip_and_resolution(tmp_path):
         wall_time=12.5,
         rng=capture_rng_state(torch.device("cpu")),
         env={"head": torch.zeros(2, 2, dtype=torch.long)},
+        observation=RECORD,
     )
     loaded = load_checkpoint(path)
     assert loaded["schema_version"] == SCHEMA_VERSION
+    assert loaded["observation"] == RECORD and "curriculum" not in loaded
     assert loaded["update"] == 5 and loaded["env_steps"] == 640 and loaded["config"] == {"a": 1}
     assert loaded["best_eval"] == -math.inf and loaded["wall_time"] == 12.5
     assert loaded["rng"]["cuda"] is None and torch.equal(loaded["env"]["head"], torch.zeros(2, 2))

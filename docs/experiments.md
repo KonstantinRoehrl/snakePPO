@@ -25,6 +25,8 @@ uv sync --no-group cuda --group cpu
 | `configs/smoke.yaml` | Tiny CPU run (4 updates) used by the tests and CI. |
 | `configs/rewards/<strategy>.yaml` | Baseline with one reward strategy turned on: sparse, distance, potential, hunger or free_space. |
 | `configs/curriculum/<grow>.yaml` | Baseline with one curriculum: board, length or both. |
+| `configs/agents/<name>.yaml` | Baseline with one other network: mlp, cnn-tiny, cnn-small, cnn-medium, recurrent, recurrent-lstm (`recurrent` with `cell: lstm`) or attention. |
+| `configs/observation/<switch>.yaml` | Baseline with one observation switch: body-order, tail, hunger or local-view. |
 
 ```sh
 uv run snakeppo train --config configs/baseline.yaml
@@ -59,6 +61,8 @@ Each switch below defaults to the vanilla baseline.
 | `ppo.entropy_coef_final` | float (> 0 for `exponential`) | `0.0005` | End value of the entropy schedule; unused with `constant`. `exponential` also needs `ppo.entropy_coef` > 0. |
 | `ppo.target_kl` | float or `null` | `null` | Stops an update's epochs early once a minibatch's approximate KL exceeds it. |
 | `train.deterministic` | `true`, `false` | `false` | Forces deterministic torch kernels so GPU runs repeat exactly (slower). |
+| `agent.name` | a name from `snakeppo agents` | `cnn` | Selects the network; see Architectures. |
+| `agent.kwargs` | mapping | `{}` | Settings of the selected network; only `recurrent` takes one (`cell`). |
 | `reward.strategy` | `classic`, `sparse`, `distance`, `potential`, `hunger`, `free_space` | `classic` | Selects the per-step reward; see Reward strategies. |
 | `reward.distance_scale` | float ≥ 0 | `0.1` | Read only by `distance`. |
 | `reward.potential_scale` | float ≥ 0 | `0.1` | Read only by `potential`. |
@@ -73,6 +77,11 @@ Each switch below defaults to the vanilla baseline.
 | `curriculum.promote_window` | int ≥ 1 | `64` | Finished in-stage episodes the promotion gate averages. Read only when `curriculum.grow` is on. |
 | `curriculum.min_updates` | int ≥ 1 | `10` | Updates a stage runs before the gate may promote it. Read only when `curriculum.grow` is on. |
 | `curriculum.max_updates` | int ≥ `curriculum.min_updates` | `100` | Updates after which a stage is promoted anyway. Read only when `curriculum.grow` is on. |
+| `observation.body` | `binary`, `order` | `binary` | `order` writes each body cell's body order instead of 1.0; see Observation. |
+| `observation.tail` | `true`, `false` | `false` | Adds the `tail` channel. |
+| `observation.hunger` | `true`, `false` | `false` | Adds the `hunger` channel. |
+| `observation.view` | `full`, `local` | `full` | `local` shows a head-centred square instead of the whole board. |
+| `observation.view_size` | odd int ≥ 5 | `11` | Side of the local view. Read only by `observation.view: local`, but always validated. |
 
 ### Reward strategies
 
@@ -90,6 +99,66 @@ when the snake eats or dies. `d` is the Manhattan distance from the head to the 
 
 The added `hunger` and `free_space` terms apply only to steps that neither eat nor die.
 `potential` takes γ from `ppo.gamma`. `uv run snakeppo rewards` lists the strategies.
+
+### Architectures
+
+`uv run snakeppo agents` lists every registered network with its parameter count (for its
+`--board-size`, default 16) and whether it plays any board size.
+
+| `agent.name` | Network | Any size |
+| --- | --- | --- |
+| `cnn` | 5 conv layers, two stride-2, adaptive 4x4 pool, MLP head (the baseline). | yes |
+| `cnn-spatial` | 6 conv layers, one stride-2 (half-resolution features), MLP head. Even boards only. | no |
+| `resnet` | 3 residual conv blocks, one stride-2, MLP head. Even boards only. | no |
+| `mlp` | Flatten, 2 hidden layers of 256, MLP head. | no |
+| `cnn-tiny`, `cnn-small`, `cnn-medium` | 3 conv layers of width 16, 32 or 64 (one stride-2), adaptive 4x4 pool, MLP head. | yes |
+| `recurrent` | The `cnn-small` encoder, then a GRU of 256, or an LSTM of 256 with `agent.kwargs: {cell: lstm}`, MLP head. | yes |
+| `attention` | Conv stem, one token per cell with a 2D sinusoidal position, 2 transformer layers of 64, mean-pooled head. | yes |
+
+- **Any size** (`size_agnostic`) means a model built for one board size loads and runs on any
+  board of at least 5, not that it plays well there: see Evaluating on another board size.
+  A board-bound network still plays any board with `observation.view: local`, since its input
+  stays `observation.view_size` square.
+- **Even boards only.** `cnn-spatial` and `resnet` need an even input side, so they refuse an
+  odd `env.board_size` and every local view (`observation.view_size` is odd).
+- **Recurrent batching.** A `recurrent` update splits the envs into
+  `max(1, ppo.rollout_steps * env.num_envs // ppo.minibatch_size)` groups of whole envs, each
+  replaying its envs' rollout from the rollout's start state, and that count must divide
+  `env.num_envs`; `train` and `sweep` refuse the config otherwise, before any run folder
+  exists. The baseline gives 8 groups of 8 envs. The hidden state is zeroed where an episode
+  starts and after a curriculum promotion.
+- Every network keeps `train.deterministic: true` working on CUDA.
+
+### Observation
+
+The policy sees an egocentric grid, rotated so the snake faces up. Its channels are always in
+this order, the optional ones only when on:
+
+| Channel | Values |
+| --- | --- |
+| `body` (`observation.body: binary`) | 1.0 on every body cell, the head included. |
+| `body_order` (`observation.body: order`) | Segment `i` (the head is 0) of a snake of length `L` is `1 - 0.9 · i / (L - 1)`: 1.0 at the head down to 0.1 at the tail; a length-1 snake is 1.0. |
+| `head` | 1.0 on the head. |
+| `food` | 1.0 on the food. |
+| `wall` | 1.0 on the wall ring and, under a curriculum, the arena's border and everything outside it. |
+| `tail` (`observation.tail: true`) | 1.0 on the tail cell and 0.5 on the segment the tail moves into next. A length-1 snake shows its one cell at 1.0, a length-2 snake marks its head 0.5, and on the step after eating, when the tail did not move, it shows the current tail. |
+| `hunger` (`observation.hunger: true`) | Every cell `steps since the last apple / env.starvation_steps`. |
+
+- **Local view** (`observation.view: local`). A `observation.view_size` square centred on the
+  head replaces the whole board, so the network's input side is `observation.view_size` on any
+  board. It is cropped around the head before the rotation, which equals cropping after it
+  because the head is the crop's centre cell. Cells off the board are wall (1.0 in `wall`, 0
+  elsewhere). Food inside the crop is 1.0; food outside is drawn at 0.5 on the crop-edge cell
+  in its direction: with `d = food - head` per axis, `r = view_size // 2` and
+  `m = max(|d_row|, |d_col|)`, the cell's offset from the head is `d · r / m` rounded half away
+  from zero. For example, head (8, 8), food (1, 10) and `view_size` 5 put it at offset
+  (−2, 1), crop cell (0, 3) before rotation. The `tail` channel is cropped like the others;
+  the `hunger` plane is added after the crop, so it is uniform over the view.
+- **Storage.** The rollout buffer stores observations as `uint8` when every value is 0 or 1,
+  which only the default observation guarantees, and as `float32` otherwise, so fractional
+  values are never truncated.
+- **One observation per run.** `run.json` and every checkpoint record the observation, and a
+  checkpoint loads only against a config describing the same one (see Checkpoints).
 
 ### Curriculum
 
@@ -152,7 +221,7 @@ A `_2`, `_3`, ... suffix is added if the folder name already exists.
 
 | Field | Meaning |
 | --- | --- |
-| `schema_version` | Run-folder format version, currently `3`. Covers this layout, the metrics keys and the checkpoint contents. |
+| `schema_version` | Run-folder format version, currently `4`. Covers this layout, the metrics keys and the checkpoint contents. |
 | `name` | `train.name`. |
 | `created` | Local timestamp with UTC offset, to the second. |
 | `git_sha` | Commit the run was trained from, or `null` outside a git checkout. |
@@ -162,6 +231,7 @@ A `_2`, `_3`, ... suffix is added if the folder name already exists.
 | `status` | `running` while training, then `finished`, `interrupted` (Ctrl+C) or `failed` (any other error). Readers also report `stalled` (below) and, for schema-1 runs, `unknown`. |
 | `total_updates` | Number of PPO updates the run loops to. |
 | `group` | `train.group`: the seed group, or `null`. |
+| `observation` | The observation record: `channels` (the channel names in order, for example `["body", "head", "food", "wall"]`), `size` (the spatial side the network sees) and `view` (`full` or `local`). Schema 4 on. |
 | `resumed` | One local timestamp per resume, oldest first. |
 
 `run.json` and the checkpoints are written atomically (a temporary file, then a rename), and
@@ -173,8 +243,9 @@ written to `metrics.jsonl` for longer than the stall window, `max(60 s, 5 × med
 of the last 10 updates)`. That usually means the training process is gone.
 
 Schema-1 folders stay readable. They store no status: it is inferred as `finished` when the
-last update equals the run's total, otherwise `unknown`. They have no group. Schema-2 and
-schema-3 runs are resumable.
+last update equals the run's total, otherwise `unknown`. They have no group. Folders before
+schema 4 record no observation: they trained on the default one. Schema-2, schema-3 and
+schema-4 runs are resumable.
 
 ### `metrics.jsonl`
 
@@ -231,15 +302,38 @@ Eval updates are every `train.eval_interval`-th update and the final update.
 | `update` | Update number at save time. |
 | `env_steps` | Environment steps at save time. |
 | `config` | The full config as a dict, enough to rebuild the model. |
-| `schema_version` | Checkpoint format version (`3`). |
+| `schema_version` | Checkpoint format version (`4`). |
 | `best_eval` | Best eval mean score so far. |
 | `wall_time` | Seconds of training at save time, including time before a resume. |
 | `rng` | Random state: `python`, `numpy`, `torch` (CPU) and `cuda` (`null` off CUDA). |
 | `env` | The training env's full state, so a resume continues the same games. |
 | `curriculum` | Stage, updates in the stage and the promotion window; only when `curriculum.grow` is on. |
+| `observation` | The run's observation record, as in `run.json`. Schema 4 on. |
+| `policy_state` | A recurrent run's hidden state, `(env.num_envs, K, 256)` on CPU with K = 1 for a GRU and 2 for an LSTM: the next rollout's start state. Only for `recurrent`. |
+
+Before loading the weights, eval and resume compare the checkpoint's observation record with
+the one its saved config describes and refuse a mismatch with a message naming both. A
+checkpoint before schema 4 has no record and loads with the default observation, the one it
+trained on.
 
 `uv run snakeppo eval <run folder or .pt file>` evaluates a checkpoint (`--checkpoint best`
-or `last`, default `best`); `--render` watches it play.
+or `last`, default `best`); `--render` watches it play. The result line names the board it
+played on: `Evaluated <checkpoint> on a 16x16 board over 64 episodes (greedy): ...`.
+
+### Evaluating on another board size
+
+```sh
+uv run snakeppo eval runs/<run> --board-size 20 [--render]
+```
+
+`--board-size N` plays the run's model on an NxN board, with everything else from the run's
+config (`env.starvation_steps` included); without it, eval plays the training board. `N` must
+be at least 5. A board-bound architecture (`any size` is `no` in `snakeppo agents`) with
+`observation.view: full` refuses any other size, naming the architecture and both sizes; with
+`observation.view: local` every architecture plays any size. Only the eval changes, never a
+training metric. How well a model plays another size is a measured result, never a promise. A
+curriculum run trains on walled arenas inside the full-size tensor, so it never sees a smaller
+tensor either.
 
 ## Resuming a run
 
@@ -249,10 +343,13 @@ uv run snakeppo train --resume runs/<run>
 
 This continues the run in place from `checkpoints/last.pt`. It drops the `metrics.jsonl` lines
 logged after that checkpoint, purges the stale TensorBoard events and adds a timestamp to
-`resumed`. It takes no other option. It resumes schema-2 and schema-3 runs; a schema-2 run
-continues as schema 3 and its `run.json` then says `3`. It refuses a finished run, a schema-1
-run, a run of a newer schema, a run with no `last.pt`, a run trained on a different device
-type, and a run still `running` within the stall window. The continuation is exact on CPU, and on GPU with `train.deterministic: true`.
+`resumed`. It takes no other option. It resumes schema-2, schema-3 and schema-4 runs; a
+schema-2 or schema-3 run continues as schema 4, and its `run.json` then says `4` and gains the
+`observation` record (the default observation, the one it trained on). A recurrent run
+continues from its checkpoint's `policy_state`. It refuses a finished run, a schema-1 run, a
+run of a newer schema, a run with no `last.pt`, a recurrent checkpoint without
+`policy_state`, a run trained on a different device type, and a run still `running` within
+the stall window. The continuation is exact on CPU, and on GPU with `train.deterministic: true`.
 
 ## Seed sweeps
 
@@ -261,7 +358,10 @@ uv run snakeppo sweep --seeds 1,2,3 --config configs/baseline.yaml [--set …] [
 ```
 
 This trains one run per seed as one seed group, with the id `<train.name>@<YYYYmmdd-HHMMSS>`.
-Each seed runs in its own `snakeppo train` child process. With `--jobs` above 1 the children's
+Before any seed starts, the sweep resolves the config and builds its network once, exactly
+as each child will, so an unknown agent, a bad `agent.kwargs`, an even-board network with the
+local view or a recurrent batching that splits an env fails once, up front. Each seed runs in
+its own `snakeppo train` child process. With `--jobs` above 1 the children's
 output is captured, and a failed seed's last 20 lines (`FAILURE_TAIL_LINES` in `sweep.py`) are
 printed when it ends. The command exits with code 1 if any seed failed. Add a seed to an
 existing group by hand with `uv run snakeppo train … --seed 4 --group <id>`.
@@ -269,7 +369,8 @@ existing group by hand with `uv run snakeppo train … --seed 4 --group <id>`.
 ## Comparing runs
 
 **What Score means.** Score is `eval/score_mean`: apples eaten in greedy play on the full board
-with no goal. It compares across reward strategies and curricula. `train/return_mean` and
+with no goal. It compares across reward strategies, curricula, architectures and
+observations. `train/return_mean` and
 `train/reward_mean` are shaped values and never compare across `reward.strategy`; under a
 curriculum `train/score_mean` is stage-relative.
 
@@ -302,7 +403,9 @@ The protocol is implemented in `src/snakeppo/results.py`:
 - **Switch units.** A selector and the keys only it reads count as one switch
   (`SELECTOR_KEYS`): `reward.strategy` with `reward.distance_scale`, `reward.potential_scale`,
   `reward.timeout_penalty`, `reward.hunger_penalty` and `reward.free_space_penalty`;
-  `curriculum.grow` with every other `curriculum.*` key.
+  `curriculum.grow` with every other `curriculum.*` key; `agent.name` with `agent.kwargs` (so
+  `recurrent` with `cell: lstm` is one switch); `observation.view` with
+  `observation.view_size`. Every other `observation.*` key is its own switch.
 - **Groups.** Runs are grouped by `group`. Ungrouped runs are left out of the table, and a group
   whose runs have different configs gets no verdict.
 - **Reference.** The newest group with no switches and the same protocol keys, or the group

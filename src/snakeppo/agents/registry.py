@@ -9,15 +9,31 @@ from typing import Any
 
 from torch import nn
 
-from snakeppo.agents.networks import CNNPolicy, PolicyNetwork, ResNetPolicy, SpatialCNNPolicy
+from snakeppo.agents.networks import (
+    AttentionPolicy,
+    CNNPolicy,
+    MLPPolicy,
+    PolicyNetwork,
+    ResNetPolicy,
+    ScalableCNNPolicy,
+    SpatialCNNPolicy,
+)
+from snakeppo.agents.recurrent import RecurrentCNNPolicy
 
 
 @dataclass(frozen=True)
 class AgentSpec:
+    """A registered architecture.
+
+    ``size_agnostic``: a model built for one board size accepts observations of any other size
+    (at least 5) and returns valid logits and values. It says nothing about how well it plays there.
+    """
+
     name: str
     description: str
     builder: Callable[..., PolicyNetwork]
     requires_even_board: bool = False
+    size_agnostic: bool = False
 
 
 _SHARED_ARGUMENTS = ("board_size", "in_channels", "num_actions")
@@ -31,7 +47,23 @@ def register(spec: AgentSpec) -> None:
     REGISTRY[spec.name] = spec
 
 
-register(AgentSpec("cnn", "5 conv layers, two stride-2, adaptive 4x4 pool, MLP head", CNNPolicy))
+def _cnn_of_width(width: int) -> Callable[..., PolicyNetwork]:
+    """A ``ScalableCNNPolicy`` builder with ``width`` fixed, so it exposes no agent.kwargs."""
+
+    def build(board_size: int, in_channels: int = 4, num_actions: int = 3) -> PolicyNetwork:
+        return ScalableCNNPolicy(board_size, in_channels, num_actions, width=width)
+
+    return build
+
+
+register(
+    AgentSpec(
+        "cnn",
+        "5 conv layers, two stride-2, adaptive 4x4 pool, MLP head",
+        CNNPolicy,
+        size_agnostic=True,
+    )
+)
 register(
     AgentSpec(
         "cnn-spatial",
@@ -46,6 +78,47 @@ register(
         "3 residual conv blocks, one stride-2, MLP head",
         ResNetPolicy,
         requires_even_board=True,
+    )
+)
+register(AgentSpec("mlp", "Flatten, 2 hidden layers of 256, MLP head; board-bound", MLPPolicy))
+register(
+    AgentSpec(
+        "cnn-tiny",
+        "3 conv layers of width 16 (one stride-2), adaptive 4x4 pool, MLP head",
+        _cnn_of_width(16),
+        size_agnostic=True,
+    )
+)
+register(
+    AgentSpec(
+        "cnn-small",
+        "3 conv layers of width 32 (one stride-2), adaptive 4x4 pool, MLP head",
+        _cnn_of_width(32),
+        size_agnostic=True,
+    )
+)
+register(
+    AgentSpec(
+        "cnn-medium",
+        "3 conv layers of width 64 (one stride-2), adaptive 4x4 pool, MLP head",
+        _cnn_of_width(64),
+        size_agnostic=True,
+    )
+)
+register(
+    AgentSpec(
+        "attention",
+        "Conv stem, one token per cell, 2 transformer layers of 64, mean-pooled head",
+        AttentionPolicy,
+        size_agnostic=True,
+    )
+)
+register(
+    AgentSpec(
+        "recurrent",
+        "cnn-small encoder, then a GRU of 256 (or an LSTM with agent.kwargs cell: lstm), MLP head",
+        RecurrentCNNPolicy,
+        size_agnostic=True,
     )
 )
 

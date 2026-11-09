@@ -4,6 +4,7 @@ from datetime import datetime
 
 import pytest
 
+from snakeppo.builders import observation_record
 from snakeppo.config import Config, apply_overrides, save_config
 from snakeppo.results import (
     BOOKKEEPING_KEYS,
@@ -36,7 +37,14 @@ def _run(tmp_path, group, seed, evals, *overrides, status="finished", created=No
     run_dir = create_run_dir(tmp_path, group or "solo", seed, now=stamp)
     save_config(config, run_dir / "config.yaml")
     write_run_info(
-        run_dir, name="x", agent="cnn", param_count=1, device="cpu", total_updates=9, group=group
+        run_dir,
+        name="x",
+        agent="cnn",
+        param_count=1,
+        device="cpu",
+        total_updates=9,
+        group=group,
+        observation=observation_record(config),
     )
     update_run_info(run_dir, status=status, created=created or "2026-11-07T09:00:00+01:00")
     with MetricsLogger(run_dir, tensorboard=False) as logger:
@@ -261,3 +269,11 @@ def test_switch_units_fold_only_keys_a_selector_owns():
     assert switch_unit("curriculum.promote_window") == "curriculum.grow"
     for shared in ("reward.apple", "reward.approach", "ppo.gamma", "ppo.target_kl"):
         assert switch_unit(shared) == shared
+
+
+def test_an_architecture_and_a_view_own_their_settings():
+    assert switch_unit("agent.kwargs") == "agent.name"
+    assert switch_unit("agent.name") == "agent.name"
+    assert switch_unit("observation.view_size") == "observation.view"
+    for own in ("observation.tail", "observation.body", "observation.hunger"):
+        assert switch_unit(own) == own

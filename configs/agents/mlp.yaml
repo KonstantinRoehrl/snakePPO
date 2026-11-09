@@ -1,0 +1,7 @@
+# Baseline with the mlp network: flatten, 2 hidden layers of 256, MLP head. Board-bound.
+# Compare its seed sweep against one of configs/baseline.yaml with snakeppo results
+# (docs/experiments.md, Comparing runs).
+agent:
+  name: mlp
+train:
+  name: agent-mlp

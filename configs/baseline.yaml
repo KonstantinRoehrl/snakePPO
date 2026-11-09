@@ -55,3 +55,9 @@ curriculum:
   promote_window: 64
   min_updates: 10
   max_updates: 100
+observation:
+  body: binary
+  tail: false
+  hunger: false
+  view: full
+  view_size: 11

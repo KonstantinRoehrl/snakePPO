@@ -6,9 +6,10 @@ from dataclasses import dataclass
 
 import torch
 
+from snakeppo.agents import PolicyPlayer
 from snakeppo.agents.networks import PolicyNetwork
 from snakeppo.builders import make_play_env
-from snakeppo.config import EnvConfig
+from snakeppo.config import EnvConfig, ObservationConfig
 from snakeppo.env import END_BODY, END_STARVED, END_WALL
 
 
@@ -43,6 +44,7 @@ class EvalStats:
 def evaluate(
     model: PolicyNetwork,
     env: EnvConfig,
+    observation: ObservationConfig,
     *,
     episodes: int,
     device: torch.device,
@@ -52,20 +54,22 @@ def evaluate(
     """Play ``episodes`` games in parallel and count each game's first finished episode.
 
     Games run on the full board with no goal and ignore the reward strategy, so scores
-    compare across reward strategies and curricula. Starvation truncation bounds every
-    episode, so this always terminates.
+    compare across reward strategies and curricula; the policy sees ``observation``, the one
+    it trained on, and a recurrent policy starts every game from a fresh state. Starvation
+    truncation bounds every episode, so this always terminates.
     """
     was_training = model.training
     model.eval()
-    game = make_play_env(env, num_envs=episodes, device=device, seed=seed)
+    game = make_play_env(env, observation, num_envs=episodes, device=device, seed=seed)
+    player = PolicyPlayer(model, episodes, game.device)
     obs = game.reset()
     finished = torch.zeros(episodes, dtype=torch.bool, device=game.device)
     scores = torch.zeros(episodes, device=game.device)
     lengths = torch.zeros(episodes, device=game.device)
     reasons = torch.zeros(episodes, dtype=torch.long, device=game.device)
     while not finished.all():
-        actions, _, _ = model.act(obs, greedy=greedy)
-        obs, _, _, _, info = game.step(actions)
+        obs, _, _, _, info = game.step(player.act(obs, greedy))
+        player.end_episodes(info["done"])
         first = info["done"] & ~finished
         scores = torch.where(first, info["episode_score"], scores)
         lengths = torch.where(first, info["episode_length"].float(), lengths)
