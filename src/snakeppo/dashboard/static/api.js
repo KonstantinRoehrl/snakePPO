@@ -1,5 +1,6 @@
-// The dashboard's read-only JSON API (served by snakeppo.dashboard.server) and the incremental
-// metrics store. Every request is a GET to the page's own origin.
+// The dashboard's JSON API (served by snakeppo.dashboard.server) and the incremental metrics
+// store. Reads are GETs; actions (launch, stop, resume, replay) are JSON POSTs. Every request goes
+// to the page's own origin, which is what the server's origin check expects.
 
 export class ApiError extends Error {
   /** `status` is the HTTP status, or 0 when the server could not be reached at all. */
@@ -15,9 +16,24 @@ export class ApiError extends Error {
 }
 
 async function getJson(path) {
+  return request(path, { headers: { Accept: "application/json" }, cache: "no-store" });
+}
+
+/** POST `body` as JSON; resolves to the JSON reply, rejects with an `ApiError` on non-2xx. */
+export async function postJson(path, body) {
+  return request(path, {
+    method: "POST",
+    headers: { Accept: "application/json", "Content-Type": "application/json" },
+    body: JSON.stringify(body ?? {}),
+    cache: "no-store",
+    credentials: "same-origin",
+  });
+}
+
+async function request(path, init) {
   let response;
   try {
-    response = await fetch(path, { headers: { Accept: "application/json" }, cache: "no-store" });
+    response = await fetch(path, init);
   } catch {
     throw new ApiError("The dashboard server cannot be reached.", 0);
   }
@@ -28,7 +44,8 @@ async function getJson(path) {
     body = null;
   }
   if (!response.ok) {
-    const message = body && typeof body.error === "string" ? body.error : `HTTP ${response.status}`;
+    const message =
+      body && typeof body.error === "string" ? body.error : response.statusText || `HTTP ${response.status}`;
     throw new ApiError(message, response.status);
   }
   return body;
@@ -52,6 +69,37 @@ export const fetchResults = (baseline) =>
 /** `{base, differences: {id: {key: [base, run]}}}` */
 export const fetchDiff = (base, ids) =>
   getJson(`/api/diff?base=${enc(base)}&runs=${ids.map(enc).join(",")}`);
+
+/** `{presets: [{path, name, description}], bookkeeping_keys: [key], configs_dir}` */
+export const fetchPresets = () => getJson("/api/presets");
+
+/** `{launches: [LaunchEntry]}`, newest first. */
+export const fetchLaunches = () => getJson("/api/launches");
+
+/** Start a train run or a seed sweep; `{launch: LaunchEntry}`. An invalid config is a 400. */
+export const startLaunch = (request) => postJson("/api/launch", request);
+
+/** Ask a running run to stop at its next update boundary; `{ok: true}`. */
+export const stopRun = (id) => postJson(`/api/runs/${enc(id)}/stop`, {});
+
+/** Continue an interrupted, stalled or failed run; `{launch: LaunchEntry}`. */
+export const resumeRun = (id) => postJson(`/api/runs/${enc(id)}/resume`, {});
+
+/** Stop a browser-launched sweep and every seed it is training; `{ok: true}`. */
+export const stopLaunch = (id) => postJson(`/api/launches/${enc(id)}/stop`, {});
+
+/** Continue a stopped sweep as the same seed group; `{launch: LaunchEntry}`. */
+export const resumeLaunch = (id) => postJson(`/api/launches/${enc(id)}/resume`, {});
+
+/** Replace the replay session with one playing `boards` ([{run, checkpoint, greedy, board_size}]); `{session}`. */
+export const createReplay = (boards, speed) => postJson("/api/replay", { boards, speed });
+
+/** `action`: pause, resume, step, speed (with `value`) or restart; `{paused, speed}`. */
+export const controlReplay = (id, action, value) =>
+  postJson(`/api/replay/${enc(id)}/control`, { action, value });
+
+/** The `EventSource` URL of a replay session's frames. */
+export const replayStreamUrl = (id) => `/api/replay/${enc(id)}/stream`;
 
 /**
  * Each run's metrics lines and the byte offset to continue from. `poll(id)` fetches what was

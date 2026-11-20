@@ -1,5 +1,5 @@
 /* snakePPO dashboard. Colour tokens first (light, then dark), then layout, components, states
-   and the narrow-screen rules. Plotly reads the --chart-* and --series-* tokens through
+   and the narrow-screen rules. Plotly reads the --chart-* and --run-* tokens through
    charts.js, so a token change restyles the charts too. */
 
 :root {
@@ -32,14 +32,14 @@
   --chart-axis: #b9c0cb;
   --chart-font: #4c5361;
   --chart-title: #14171d;
-  --series-1: #2f6fde;
-  --series-2: #d9612b;
-  --series-3: #16926b;
-  --series-4: #9a46cf;
-  --series-5: #b9860f;
-  --series-6: #cf3f74;
-  --series-7: #2f93b8;
-  --series-8: #6b717d;
+  /* Run colours: colors.js hashes each run id onto one slot (RUN_PALETTE_SIZE = 7). */
+  --run-1: #2f6fde;
+  --run-2: #d9612b;
+  --run-3: #16926b;
+  --run-4: #9a46cf;
+  --run-5: #b9860f;
+  --run-6: #cf3f74;
+  --run-7: #2f93b8;
 
   --font: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
   --text-xs: 0.75rem;
@@ -87,14 +87,13 @@
     --chart-axis: #3d4450;
     --chart-font: #a4acba;
     --chart-title: #e6e8ed;
-    --series-1: #6f9bff;
-    --series-2: #ff8a57;
-    --series-3: #3fc49a;
-    --series-4: #c07cf0;
-    --series-5: #e6b84a;
-    --series-6: #f06d9b;
-    --series-7: #62bfe0;
-    --series-8: #a3a9b5;
+    --run-1: #5d87e9;
+    --run-2: #d86632;
+    --run-3: #06a47d;
+    --run-4: #ac68db;
+    --run-5: #af8503;
+    --run-6: #d95987;
+    --run-7: #3899b9;
   }
 }
 
@@ -128,14 +127,13 @@
   --chart-axis: #3d4450;
   --chart-font: #a4acba;
   --chart-title: #e6e8ed;
-  --series-1: #6f9bff;
-  --series-2: #ff8a57;
-  --series-3: #3fc49a;
-  --series-4: #c07cf0;
-  --series-5: #e6b84a;
-  --series-6: #f06d9b;
-  --series-7: #62bfe0;
-  --series-8: #a3a9b5;
+  --run-1: #5d87e9;
+  --run-2: #d86632;
+  --run-3: #06a47d;
+  --run-4: #ac68db;
+  --run-5: #af8503;
+  --run-6: #d95987;
+  --run-7: #3899b9;
 }
 
 /* ------------------------------------------------------------------ base */
@@ -359,6 +357,22 @@ select {
   background: var(--accent-soft);
 }
 
+.button-small {
+  min-height: 1.75rem;
+  padding: 0.15rem 0.6rem;
+  font-size: var(--text-xs);
+}
+
+/* Stop: ends a run (resumable), so it reads as the one destructive action in a row. */
+.button-danger {
+  border-color: color-mix(in srgb, var(--bad) 45%, var(--line-strong));
+  color: var(--bad);
+}
+
+.button-danger:hover {
+  background: color-mix(in srgb, var(--bad) 9%, var(--surface));
+}
+
 .field {
   display: grid;
   gap: 0.25rem;
@@ -540,23 +554,29 @@ select {
   padding: 0 0.4rem;
 }
 
+/* A run row: the label (checkbox and facts) plus its action buttons below it. --run-color is
+   the run's fixed colour, set on the row by app.js. */
+.run-row {
+  border-radius: var(--radius);
+  transition: background-color var(--speed) var(--ease-out);
+}
+
+.run-row:hover {
+  background: var(--surface-3);
+}
+
+.run-row.is-selected {
+  background: color-mix(in srgb, var(--run-color) 10%, var(--surface));
+  box-shadow: inset 0 0 0 2px var(--run-color);
+}
+
 .run {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr);
   gap: 0.15rem 0.55rem;
   align-items: start;
-  padding: 0.45rem 0.45rem 0.5rem;
-  border-radius: var(--radius);
+  padding: 0.45rem 0.45rem 0.35rem;
   cursor: pointer;
-  transition: background-color var(--speed) var(--ease-out);
-}
-
-.run:hover {
-  background: var(--surface-3);
-}
-
-.run.is-selected {
-  background: var(--accent-soft);
 }
 
 .run input {
@@ -574,12 +594,66 @@ select {
   min-width: 0;
 }
 
+.run-name {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  min-width: 0;
+}
+
 .run-title {
   min-width: 0;
   font-weight: 600;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.run-dot {
+  flex: none;
+  width: 0.625rem;
+  height: 0.625rem;
+  border-radius: 50%;
+  background: var(--run-color, var(--neutral));
+}
+
+.run-desc {
+  grid-column: 2;
+  display: -webkit-box;
+  overflow: hidden;
+  font-size: var(--text-xs);
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+}
+
+.run-note {
+  grid-column: 2;
+  font-size: var(--text-xs);
+  color: var(--ink-2);
+  font-style: italic;
+}
+
+.run-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.35rem 0.5rem;
+}
+
+/* In the list the buttons line up with the text column, past the checkbox. */
+.run-row .run-actions {
+  padding: 0 0.45rem 0.5rem calc(0.45rem + 1rem + 0.55rem);
+}
+
+.action-error {
+  margin: 0;
+  font-size: var(--text-sm);
+}
+
+.run-row .action-error {
+  padding: 0 0.45rem 0.5rem calc(0.45rem + 1rem + 0.55rem);
+  font-size: var(--text-xs);
 }
 
 .run-section-title {
@@ -747,6 +821,7 @@ select {
 
 .tabs {
   display: flex;
+  flex-wrap: wrap;
   gap: 0.25rem;
 }
 
@@ -885,6 +960,15 @@ select {
   font-size: var(--text-2xl);
   font-weight: 650;
   overflow-wrap: anywhere;
+}
+
+.run-header-top .run-dot {
+  width: 0.875rem;
+  height: 0.875rem;
+}
+
+.run-description {
+  max-width: 75ch;
 }
 
 .run-facts {
@@ -1049,6 +1133,54 @@ select {
 
 .table td .badge {
   margin-right: 0.35rem;
+}
+
+.group-cell {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.cell-sub {
+  display: block;
+  max-width: 48ch;
+  margin-top: 0.15rem;
+  color: var(--ink-2);
+  font-size: var(--text-xs);
+}
+
+/* Compare: which colour is which run (or seed group), with its description. */
+.legend-card h3 {
+  margin-bottom: 0.5rem;
+  font-size: var(--text-lg);
+  font-weight: 650;
+}
+
+.legend-list {
+  display: grid;
+  gap: 0.45rem;
+  margin: 0 0 0.25rem;
+  padding: 0;
+  list-style: none;
+}
+
+.legend-list li {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  column-gap: 0.5rem;
+}
+
+.legend-name {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.legend-desc {
+  grid-column: 2;
+  max-width: 75ch;
+  color: var(--ink-2);
+  font-size: var(--text-sm);
 }
 
 .results-bar {

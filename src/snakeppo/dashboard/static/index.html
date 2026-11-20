@@ -14,6 +14,8 @@
       }
     </script>
     <link rel="stylesheet" href="/static/style.css" />
+    <link rel="stylesheet" href="/static/launch.css" />
+    <link rel="stylesheet" href="/static/replay.css" />
     <script src="/vendor/plotly.min.js"></script>
     <script type="module" src="/static/app.js"></script>
   </head>
@@ -103,6 +105,12 @@
             <button type="button" class="tab" role="tab" id="tab-results" aria-controls="panel-results" aria-selected="false" tabindex="-1">
               Results
             </button>
+            <button type="button" class="tab" role="tab" id="tab-launch" aria-controls="panel-launch" aria-selected="false" tabindex="-1">
+              Launch
+            </button>
+            <button type="button" class="tab" role="tab" id="tab-replay" aria-controls="panel-replay" aria-selected="false" tabindex="-1">
+              Replay
+            </button>
           </div>
           <div class="view-controls" id="view-controls">
             <fieldset class="segmented" id="x-control">
@@ -125,6 +133,7 @@
         <section class="panel" role="tabpanel" id="panel-compare" aria-labelledby="tab-compare" hidden>
           <div id="compare-empty"></div>
           <div id="compare-notice"></div>
+          <div id="compare-legend" hidden></div>
           <div id="compare-board"></div>
           <div id="compare-diff"></div>
         </section>
@@ -140,6 +149,14 @@
           </div>
           <div id="results-error"></div>
           <div id="results-body"></div>
+        </section>
+
+        <section class="panel" role="tabpanel" id="panel-launch" aria-labelledby="tab-launch" hidden>
+          <div id="launch-root"></div>
+        </section>
+
+        <section class="panel" role="tabpanel" id="panel-replay" aria-labelledby="tab-replay" hidden>
+          <div id="replay-root"></div>
         </section>
       </main>
     </div>
