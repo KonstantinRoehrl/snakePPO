@@ -195,3 +195,32 @@ def load_policy(checkpoint: Mapping[str, Any], config: Config, where: Path) -> P
             f"{describe_record(expected)}: {first_line}"
         ) from error
     return model
+
+
+def plays_any_size(config: Config) -> bool:
+    """Whether the run's network plays boards of other sizes than the one it trained on.
+
+    A size-agnostic architecture accepts any board; a local view feeds any network the same
+    fixed window whatever the board.
+    """
+    return REGISTRY[config.agent.name].size_agnostic or config.observation.view != "full"
+
+
+def play_env_config(config: Config, board_size: int | None) -> EnvConfig:
+    """The run's env section, on ``board_size`` if given (eval, watch and replay).
+
+    Not re-validated: the rest of the config describes training (a curriculum's ``start_board``
+    may not fit a smaller play board), and playing reads only the env and observation.
+    """
+    if board_size is None:
+        return config.env
+    if board_size < 5:
+        raise ValueError(f"--board-size must be at least 5, got {board_size}")
+    trained, name = config.env.board_size, config.agent.name
+    if board_size != trained and not plays_any_size(config):
+        raise ValueError(
+            f"agent '{name}' is board-bound: it trained on a {trained}x{trained} board and "
+            f"cannot play {board_size}x{board_size}; use a size-agnostic architecture "
+            "(see 'snakeppo agents') or train with observation.view: local"
+        )
+    return replace(config.env, board_size=board_size)
