@@ -243,7 +243,7 @@ export function mountReplay(root, ctx) {
 
   function removeBoard(index) {
     boards = boards.filter((_, at) => at !== index);
-    boardsChanged();
+    boardsChanged([`remove:${index - 1}`, "add"]);
   }
 
   function addBoard() {
@@ -254,9 +254,9 @@ export function mountReplay(root, ctx) {
     boardsChanged();
   }
 
-  function boardsChanged() {
+  function boardsChanged(focusFallbacks) {
     writeHash();
-    renderBoards();
+    renderBoards(focusFallbacks);
     startSession();
   }
 
@@ -398,7 +398,8 @@ export function mountReplay(root, ctx) {
     );
   }
 
-  function renderBoards() {
+  // focusFallbacks: keys to try, in order, when the focused control no longer exists.
+  function renderBoards(focusFallbacks = []) {
     const focused = document.activeElement?.dataset?.focusKey;
     canvases = [];
     statsNodes = [];
@@ -408,7 +409,11 @@ export function mountReplay(root, ctx) {
     );
     for (let index = 0; index < boards.length; index += 1) renderStats(index);
     runsSignature = runsKey();
-    if (focused) grid.querySelector(`[data-focus-key="${CSS.escape(focused)}"]`)?.focus();
+    const focusTarget = [focused, ...focusFallbacks]
+      .filter(Boolean)
+      .map((key) => grid.querySelector(`[data-focus-key="${CSS.escape(key)}"]`))
+      .find((node) => node && !node.disabled);
+    focusTarget?.focus();
     fitCanvases();
     scheduleDraw();
   }
