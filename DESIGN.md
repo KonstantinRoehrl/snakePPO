@@ -1,6 +1,6 @@
 ---
 name: snakePPO dashboard
-description: A localhost, read-only research dashboard for watching PPO runs and judging switches across seeds.
+description: A localhost research dashboard for launching and watching PPO runs, judging switches across seeds and replaying trained agents.
 colors:
   bg: "#f4f5f7"
   surface: "#ffffff"
@@ -28,14 +28,20 @@ colors:
   chart-axis: "#b9c0cb"
   chart-font: "#4c5361"
   chart-title: "#14171d"
-  series-1: "#2f6fde"
-  series-2: "#d9612b"
-  series-3: "#16926b"
-  series-4: "#9a46cf"
-  series-5: "#b9860f"
-  series-6: "#cf3f74"
-  series-7: "#2f93b8"
-  series-8: "#6b717d"
+  run-1: "#2f6fde"
+  run-2: "#d9612b"
+  run-3: "#16926b"
+  run-4: "#9a46cf"
+  run-5: "#b9860f"
+  run-6: "#cf3f74"
+  run-7: "#2f93b8"
+  board-bg: "#101318"
+  board-grid: "#1b2029"
+  board-wall: "#3a404b"
+  board-food: "#e5484d"
+  board-head: "#9af0a6"
+  board-snake-near: "#3fbf55"
+  board-snake-tail: "#1d5a2a"
   dark-bg: "#0e1014"
   dark-surface: "#161920"
   dark-surface-2: "#1b1f27"
@@ -55,14 +61,13 @@ colors:
   dark-skeleton: "#20242d"
   dark-skeleton-shine: "#282d37"
   dark-chart-grid: "#232832"
-  dark-series-1: "#6f9bff"
-  dark-series-2: "#ff8a57"
-  dark-series-3: "#3fc49a"
-  dark-series-4: "#c07cf0"
-  dark-series-5: "#e6b84a"
-  dark-series-6: "#f06d9b"
-  dark-series-7: "#62bfe0"
-  dark-series-8: "#a3a9b5"
+  dark-run-1: "#5d87e9"
+  dark-run-2: "#d86632"
+  dark-run-3: "#06a47d"
+  dark-run-4: "#ac68db"
+  dark-run-5: "#af8503"
+  dark-run-6: "#d95987"
+  dark-run-7: "#3899b9"
 typography:
   headline:
     fontFamily: "system-ui, -apple-system, Segoe UI, Roboto, Helvetica Neue, Arial, sans-serif"
@@ -201,7 +206,7 @@ components:
 
 **Creative North Star: "The Calm Readout"**
 
-The dashboard is a working instrument for one researcher who keeps it open beside the terminal while a run trains. Everything about the system steps back so the curves can speak: cool grey neutrals in three surface tiers, one blue accent for selection and action, a separate eight-hue palette reserved for data series, and a small set of state hues (green, amber, red, grey) that only appear where they carry a verdict or a run status. It is dense in the way good operator tools are dense: 13px controls, 2rem hit targets, a fixed sidebar of runs and a scrolling workspace of chart cards.
+The dashboard is a working instrument for one researcher who keeps it open beside the terminal while a run trains. Everything about the system steps back so the curves can speak: cool grey neutrals in three surface tiers, one blue accent for selection and action, a separate seven-hue palette reserved for run identity, and a small set of state hues (green, amber, red, grey) that only appear where they carry a verdict or a run status. It is dense in the way good operator tools are dense: 13px controls, 2rem hit targets, a fixed sidebar of runs and a scrolling workspace of chart cards.
 
 The form is the standard internal-tool shell, on purpose: sticky header, a sidebar list with filters, tabs over the workspace, cards of Plotly charts, plain tables. The character lives in restraint and in the honesty of the states: a dashed empty box that names the exact CLI command to run, a skeleton where a chart is still loading, an amber callout when a run looks stalled, a red banner when the server cannot be reached. Light and dark are both first-class and follow the system unless the researcher pins one; every chart colour is read from the same tokens, so the charts change theme with the page.
 
@@ -210,7 +215,8 @@ This record is derived from the shipped build (commit `4dfe3c6`). The North Star
 **Key Characteristics:**
 - Three cool-grey surface tiers plus white cards; depth comes mostly from tone and hairlines.
 - One accent blue for action, selection and focus; status hues only for status.
-- A dedicated eight-colour series palette, tuned separately for light and dark.
+- A dedicated seven-colour run palette, tuned separately for light and dark, assigned by a hash of the run id so a run keeps its colour in every view.
+- A dark playing field for replay boards in both themes, drawn on a canvas from its own tokens.
 - Platform UI sans throughout; monospace only for code and commands.
 - Every view has a designed loading, empty, error and stale state.
 
@@ -233,13 +239,18 @@ A cool, low-chroma grey frame with one saturated blue and a separate set of data
 ### State
 - **Finished Green** (`ok`), **Stalled Amber** (`warn`), **Failed Red** (`bad`), **Idle Grey** (`neutral`), and `info` (same as the accent) for running. They colour status badges, verdict badges, progress fills, the stalled callout, the error banner and invalid field borders, and nothing else.
 
-### Data series
-- `series-1` to `series-8` (blue, orange, green, violet, ochre, rose, teal, grey), with `dark-series-*` counterparts. Runs and groups take them in order and wrap after eight.
+### Run palette
+- `run-1` to `run-7` (blue, orange, green, violet, ochre, rose, teal), with `dark-run-*` counterparts. A run's colour is `FNV-1a(run id) mod 7` (`colors.js`), so the run list dot, the Live title dot, chart lines, Compare and Results swatches, Launch dots and Replay board dots all agree and a run never changes colour when the selection does. Two runs can share a colour; legends and hover text still tell them apart, and a group takes the colour of its group id the same way.
+
+### Board
+- `board-bg`, `board-grid`, `board-wall`, `board-food`, `board-head`, `board-snake-near`, `board-snake-tail`: the replay playing field. It is a dark board in both themes, so the seven tokens have one value and are repeated in the three theme blocks of `replay.css` to keep that explicit. The snake shades linearly from `board-snake-near` at the head's neighbour to `board-snake-tail` at the tip, the same body-order rule the observation uses; the head is `board-head`, food is `board-food` and walls are `board-wall`. These colours describe the game, not a run's identity or a verdict.
 
 ### Named Rules
-**The Tokens-All-The-Way-Down Rule.** Every colour on screen, including Plotly's paper, grid, axis, font, hover label and series, is read from a CSS custom property. A theme change re-reads the tokens and redraws; no chart carries a literal hex.
+**The Tokens-All-The-Way-Down Rule.** Every colour on screen, including Plotly's paper, grid, axis, font, hover label and run lines, and the replay board, is read from a CSS custom property. A theme change re-reads the tokens and redraws; no chart or canvas carries a literal hex.
 
-**The Status-Is-Not-Decoration Rule.** `ok`, `warn`, `bad` and `neutral` appear only where they report a run status, a verdict, or a problem. Series colours identify data; they never signal state.
+**The Status-Is-Not-Decoration Rule.** `ok`, `warn`, `bad` and `neutral` appear only where they report a run status, a verdict, or a problem. Run colours identify a run; they never signal state.
+
+**The One Run, One Colour Rule.** A run's colour comes from its id and nowhere else. Never assign colours by position in a list or selection, so ticking another run never recolours the ones already on screen.
 
 **The Mix-Don't-Pick Rule.** Tinted state surfaces are mixed from the state hue, not picked as new swatches: badges at 12% hue over the surface with a 35% hue border and text at 70% hue over ink; callouts and banners at 6-9% hue over the surface with a 35-45% hue border.
 
@@ -267,9 +278,11 @@ A cool, low-chroma grey frame with one saturated blue and a separate set of data
 
 ## Layout
 
-A fixed application shell: a sticky header (3.25rem) on Rail Grey, then a two-column grid with a 20rem sidebar and a fluid workspace, each scrolling independently inside the viewport height. The sidebar stacks a two-column filter form, a meta line with quiet actions, an optional notice, and the scrolling run list with sticky group headings. The workspace opens with a sticky bar holding the tabs on the left and view controls (x-axis segmented control, Group seeds checkbox) on the right.
+A fixed application shell: a sticky header (3.25rem) on Rail Grey, then a two-column grid with a 20rem sidebar and a fluid workspace, each scrolling independently inside the viewport height. The sidebar stacks a two-column filter form, a meta line with quiet actions, an optional notice, and the scrolling run list with sticky group headings. The workspace opens with a sticky bar holding the five tabs (Live, Compare, Results, Launch, Replay) on the left and view controls (x-axis segmented control, Group seeds checkbox) on the right.
 
-The Live and Compare boards are a column of cards: one hero card holding the eval-score chart (23rem tall, with a range slider), then three metric cards each holding a grid of small charts (13.75rem tall), three across. At 1100px and below the grid drops to two across. At 760px and below the shell collapses: the header wraps, the folder summary hides, a Runs toggle shows the sidebar as a block above the workspace, the workspace bar stops being sticky, charts go one across and the hero drops to 18rem.
+The Launch tab is a two-column grid, the preset picker (`minmax(16rem, 1fr)`) beside the start form (`1.35fr`), with the launches table full width below; at 1100px and below it stacks to one column and the picker's scroll height drops from 34rem to 22rem. The Replay tab is a toolbar card over a two-column grid of board cards (up to four, the last slot an "Add a board" tile); at 760px and below the boards go one across and their stat strip drops from five columns to three.
+
+The Live and Compare boards are a column of cards: one hero card holding the eval-score chart (23rem tall, with a range slider), then three metric cards each holding a grid of small charts (13.75rem tall), three across. At 1100px and below the grid drops to two across. At 760px and below the shell collapses: the header wraps, the folder summary hides, a Runs toggle shows the sidebar as a block above the workspace, the workspace bar stops being sticky, charts go one across and the hero drops to 18rem. The tab row stays on one line (tighter 0.5rem tab padding) and scrolls sideways below about 340px rather than wrapping a tab onto a second row.
 
 Spacing runs on a rem rhythm: 0.25rem inside tight groups, 0.5-0.75rem between controls and chart tiles, 0.85rem as the sidebar's inner inset, 1rem between cards, 1.25rem workspace gutters and panel top, 1.75rem above a results section title. Prose blocks cap at 75ch, empty states at 62ch.
 
@@ -342,13 +355,28 @@ Plotly, themed entirely from tokens. Chart paper and plot match the card surface
 - **Shared x-range:** zooming one chart on a board pans the others; zoom survives new data (one `uirevision` per chart and x mode).
 - **Empty chart:** a centered 12px annotation ("No values yet", "No evaluation recorded yet").
 
+### Launch
+The place that starts, stops and resumes training; the only part of the dashboard that changes anything on disk.
+- **Preset picker:** a card of presets grouped by folder under 12px/650 Secondary Ink group headings. Each preset is a 6px-rounded, hairline-bordered radio row (a real radio input stretched over the row) with the name at 600, the file path in 12px Secondary Ink, and its description clamped to three lines. Hover takes Hover Grey; the chosen preset takes Blue Wash with an accent border plus a 1px inset accent ring, never a side stripe. The list scrolls inside its card and keyboard focus draws the global focus ring around the row.
+- **Start form:** a card headed by the config file name and its `train.name` as a code chip. A segmented control picks "Single run" or "Seed sweep" (a sweep adds a seeds field and a jobs field, 2:1). Overrides are a monospace textarea of `section.key=value` lines, which is code; the description is a prose textarea in the page font. "Start run" is the one filled accent button in the product. A refused start shows an inline error in Failed Red, pre-wrapped, and a line under the button says the config is checked before anything starts.
+- **Launches table:** the standard table, with a leading dot cell showing the launched run's colour (a dashed hollow dot until its run folder exists), the action and its detail, status badges, and actions. Stop is the only destructive control and uses a Failed Red text and a red-tinted border and hover mixed with `color-mix`; each launch's log opens in a `details` block with a monospace `pre` capped at 16rem tall.
+- **Empty:** the standard dashed empty box ("Nothing started from the dashboard yet") that says where runs started from the terminal show up.
+
+### Replay
+Trained agents playing side by side, in the browser.
+- **Toolbar:** one card holding Pause, Step and Restart as standard buttons, a Speed segmented control (2/s to Max), and a right-aligned hint line stating where the replay runs and that a new game starts after each death.
+- **Board card:** a 10px-rounded card with the lift shadow holding the run's colour dot and a run select, a remove button, the board-size field, a square canvas on `board-bg`, and a five-cell stat strip (each cell a 6px-rounded Rail Grey tile with a 12px label over a 1rem/650 tabular value).
+- **Add a board:** a dashed, transparent, 10px-rounded button tile, 18rem tall, with a 650 title and a hint; it goes to 55% opacity and not-allowed at four boards.
+- **Board drawing (signature):** `board.js` draws a frame on a 2D canvas in a fixed order: background, grid lines, walls as filled cells, the food as a dot at 35% of a cell, then the snake from tail to head so the head is drawn last. Body segments are inset rounded squares (8% inset, 25% radius) shaded from `board-snake-near` to `board-snake-tail` along the body; the head is `board-head` with a one-pixel smaller inset. The board is centred and sized to whole-pixel cells. It re-reads the board tokens on a theme change.
+
 ### Motion
 State transitions on background, border and colour run 180ms on an exponential ease-out (`cubic-bezier(0.16, 1, 0.3, 1)`); progress bars ease their width over 240ms. Reduced-motion turns off every animation and transition, skeleton pulse included.
 
 ## Do's and Don'ts
 
 ### Do:
-- **Do** read every chart colour through the tokens (`--chart-*`, `--series-*`, `--ink`, `--surface`, `--line-strong`, `--font`) and re-read them on a theme change.
+- **Do** read every chart and canvas colour through the tokens (`--chart-*`, `--run-*`, `--board-*`, `--ink`, `--surface`, `--line-strong`, `--font`) and re-read them on a theme change.
+- **Do** colour a run through `colors.js` (`runColor`, `runColorVar`, `runColorIndex`) in every view, so one run is one colour everywhere.
 - **Do** give every new token a light value and a dark value, and set both dark blocks (system preference and the pinned `data-theme="dark"`).
 - **Do** derive tinted state surfaces with `color-mix` from the state hue (12% / 35% / 70% for badges, 6-9% fill with a 35-45% border for callouts and banners).
 - **Do** use tabular numerals for every number that sits in a column or updates live.
@@ -358,7 +386,8 @@ State transitions on background, border and colour run 180ms on an exponential e
 
 ### Don't:
 - **Don't** write a literal hex into a component rule or a Plotly layout; add or reuse a token.
-- **Don't** use `ok`, `warn`, `bad` or `neutral` for decoration or to tell series apart; don't use series colours to signal state.
+- **Don't** use `ok`, `warn`, `bad` or `neutral` for decoration or to tell runs apart; don't use run colours to signal state.
+- **Don't** colour a run by its position in the list or selection, or give the replay board a second theme.
 - **Don't** give the reference an outcome colour; it stays outline-only in the accent.
 - **Don't** add a second shadow or a coloured side stripe; separate with a surface tier, a hairline or a full 1px tinted border.
 - **Don't** set prose, labels or headings in monospace; it is for code and commands.
