@@ -5,27 +5,27 @@ from __future__ import annotations
 import argparse
 import os
 import sys
-import time
+import webbrowser
 from collections.abc import Sequence
 from dataclasses import replace
 from pathlib import Path
+from urllib.parse import quote
 
 import torch
 
-from snakeppo.agents import REGISTRY, PolicyPlayer, available_agents, build_agent, count_parameters
+from snakeppo.agents import REGISTRY, available_agents, build_agent, count_parameters
 from snakeppo.agents.networks import PolicyNetwork
 from snakeppo.builders import (
     EVAL_SEED_OFFSET,
     load_policy,
-    make_play_env,
     make_policy,
+    play_env_config,
     resolve_device,
 )
 from snakeppo.config import (
     DEFAULT_CONFIGS_DIR,
     Config,
     ConfigError,
-    EnvConfig,
     Preset,
     config_from_dict,
     describe_changes,
@@ -34,12 +34,16 @@ from snakeppo.config import (
     run_description,
     validate,
 )
+from snakeppo.dashboard.replay import MAX_BOARDS, REPLAY_SPEEDS
 from snakeppo.dashboard.server import DEFAULT_PORT
 from snakeppo.evaluation import evaluate
 from snakeppo.results import BOOKKEEPING_KEYS, FORMATS, format_results, results_table, truncate
 from snakeppo.rewards import REWARDS, available_rewards
 from snakeppo.runs import (
+    CHECKPOINT_DIR,
+    CHECKPOINT_NAMES,
     CONFIG_FILE,
+    RUN_INFO_FILE,
     find_runs,
     load_checkpoint,
     load_run,
@@ -70,16 +74,36 @@ def _parser() -> argparse.ArgumentParser:
     ev.add_argument("--checkpoint", choices=("best", "last"), default="best")
     ev.add_argument("--episodes", type=int, help="episodes to play (default: train.eval_episodes)")
     ev.add_argument("--stochastic", action="store_true", help="sample actions instead of argmax")
-    ev.add_argument("--device", default="auto", help="auto, cpu, cuda or mps")
+    ev.add_argument(
+        "--device", default="auto", help="auto, cpu, cuda or mps (the replay always uses the cpu)"
+    )
     ev.add_argument(
         "--board-size",
         type=int,
         metavar="N",
         help="play on an NxN board (default: the run's board; at least 5)",
     )
-    ev.add_argument("--render", action="store_true", help="watch the agent play in a window")
-    ev.add_argument("--envs", type=int, default=4, help="games shown with --render (1-4)")
-    ev.add_argument("--sleep", type=float, default=0.05, help="seconds between rendered steps")
+    ev.add_argument(
+        "--render",
+        action="store_true",
+        help="watch the agent play in the browser replay (starts a dashboard if none serves it)",
+    )
+    ev.add_argument(
+        "--envs", type=int, default=MAX_BOARDS, help=f"boards shown with --render (1-{MAX_BOARDS})"
+    )
+    ev.add_argument(
+        "--sleep",
+        type=float,
+        default=0.1,
+        help="seconds between steps with --render, rounded to the nearest replay speed "
+        "(default 0.1 = 10 steps a second; 0 = as fast as possible)",
+    )
+    ev.add_argument(
+        "--port",
+        type=int,
+        default=DEFAULT_PORT,
+        help="dashboard port --render opens, or starts a dashboard on (default %(default)s)",
+    )
 
     agents = commands.add_parser("agents", help="list available architectures")
     agents.add_argument("--board-size", type=int, default=16)
@@ -224,36 +248,12 @@ def _load_model(args: argparse.Namespace) -> tuple[PolicyNetwork, Config, Path, 
     return model.to(device).eval(), config, checkpoint_path, device
 
 
-def _play_env_config(config: Config, board_size: int | None) -> EnvConfig:
-    """The run's env section, on ``board_size`` if given.
-
-    Not re-validated: the rest of the config describes training (a curriculum's ``start_board``
-    may not fit a smaller play board), and eval and watch read only the env and observation.
-    """
-    if board_size is None:
-        return config.env
-    if board_size < 5:
-        raise ValueError(f"--board-size must be at least 5, got {board_size}")
-    trained, name = config.env.board_size, config.agent.name
-    if (
-        board_size != trained
-        and config.observation.view == "full"
-        and not REGISTRY[name].size_agnostic
-    ):
-        raise ValueError(
-            f"agent '{name}' is board-bound: it trained on a {trained}x{trained} board and "
-            f"cannot play {board_size}x{board_size}; use a size-agnostic architecture "
-            "(see 'snakeppo agents') or train with observation.view: local"
-        )
-    return replace(config.env, board_size=board_size)
-
-
 def _eval(args: argparse.Namespace) -> int:
-    model, config, checkpoint_path, device = _load_model(args)
-    play = _play_env_config(config, args.board_size)
-    greedy = not args.stochastic
     if args.render:
-        return _watch(model, config, play, device, args, greedy)
+        return _render(args)
+    model, config, checkpoint_path, device = _load_model(args)
+    play = play_env_config(config, args.board_size)
+    greedy = not args.stochastic
     episodes = args.episodes or config.train.eval_episodes
     stats = evaluate(
         model,
@@ -277,38 +277,61 @@ def _eval(args: argparse.Namespace) -> int:
     return 0
 
 
-def _watch(
-    model: PolicyNetwork,
-    config: Config,
-    play: EnvConfig,
-    device: torch.device,
-    args: argparse.Namespace,
-    greedy: bool,
-) -> int:
-    from snakeppo.viewer import Viewer
+def speed_for_sleep(sleep: float) -> int:
+    """The replay speed (steps per second) nearest one step every ``sleep`` seconds; 0 is Max."""
+    if sleep <= 0:
+        return 0
+    steps = [speed for speed in REPLAY_SPEEDS if speed]
+    return min(steps, key=lambda speed: abs(speed - 1 / sleep))
 
-    env = make_play_env(
-        play,
-        config.observation,
-        num_envs=max(1, min(args.envs, 4)),
-        device=device,
-        seed=play.seed + EVAL_SEED_OFFSET,
-    )
-    player = PolicyPlayer(model, env.num_envs, device)
-    obs = env.reset()
-    finished = 0
-    print("Close the window to stop.")
-    with Viewer(env.board_size, env.num_envs) as viewer, torch.no_grad():
-        while viewer.draw(env.render_grid(), env.score.tolist(), env.render_body_order()):
-            obs, _, _, _, info = env.step(player.act(obs, greedy))
-            player.end_episodes(info["done"])
-            for score in info["episode_score"][info["done"]].tolist():
-                finished += 1
-                print(f"Episode {finished} finished with score {score:.0f}")
-            if args.episodes and finished >= args.episodes:
-                break
-            time.sleep(args.sleep)
-    return 0
+
+def _render(args: argparse.Namespace) -> int:
+    """Open the browser replay of the run, on the dashboard that serves its runs folder."""
+    from snakeppo.dashboard import server
+
+    if args.episodes is not None:
+        raise ValueError(
+            "--episodes cannot be combined with --render: the browser replay plays until you "
+            "close it; drop --render to score a fixed number of episodes"
+        )
+    if not 1 <= args.envs <= MAX_BOARDS:
+        raise ValueError(f"--envs must be 1 to {MAX_BOARDS} with --render, got {args.envs}")
+    run_dir, checkpoint_path = resolve_checkpoint(args.target, args.checkpoint)
+    # the replay addresses a run by its folder name under the served runs folder
+    if not (
+        checkpoint_path.parent.name == CHECKPOINT_DIR
+        and checkpoint_path.name in {f"{name}.pt" for name in CHECKPOINT_NAMES}
+        and (run_dir / RUN_INFO_FILE).is_file()
+    ):
+        raise ValueError(
+            f"--render plays the best.pt or last.pt checkpoint of a run folder, and "
+            f"{args.target} is not one; score it with headless 'snakeppo eval {args.target}'"
+        )
+    # load the network now so a checkpoint that does not fit fails here, not in the browser
+    checkpoint = load_checkpoint(checkpoint_path, map_location="cpu")
+    config = config_from_dict(checkpoint["config"])
+    load_policy(checkpoint, config, checkpoint_path)
+    play_env_config(config, args.board_size)
+
+    mode = "stochastic" if args.stochastic else "greedy"
+    size = "" if args.board_size is None else str(args.board_size)
+    token = quote("|".join([run_dir.name, checkpoint_path.stem, mode, size]), safe="")
+    boards = ",".join([token] * args.envs)
+    open_path = f"#tab=replay&boards={boards}&speed={speed_for_sleep(args.sleep)}"
+    runs_dir = run_dir.resolve().parent
+    served = server.served_runs_dir(args.port)
+    if served == runs_dir:
+        print(f"Opening the replay on the dashboard at http://{server.HOST}:{args.port}/")
+        webbrowser.open(f"http://{server.HOST}:{args.port}/{open_path}")
+        return 0
+    port = args.port
+    if served is not None:
+        print(
+            f"The dashboard on port {args.port} serves {served}, not {runs_dir}; "
+            "starting another one on a free port."
+        )
+        port = 0
+    return server.serve(runs_dir, port, open_browser=True, open_path=open_path)
 
 
 def _agents(args: argparse.Namespace) -> int:
