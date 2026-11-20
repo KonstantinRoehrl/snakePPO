@@ -71,7 +71,6 @@ from snakeppo.dashboard.api import (
     run_summary,
 )
 from snakeppo.dashboard.launches import (
-    LAUNCH_FILE,
     LaunchConflict,
     LaunchError,
     Spawn,
@@ -444,11 +443,9 @@ class _Handler(BaseHTTPRequestHandler):
     def _launch_id(self, launch_id: str) -> str:
         """``launch_id`` when it names a launch record of this runs folder; 404 otherwise."""
         try:
-            folder = launch_folder(self.server.runs_dir, launch_id)
+            launch_folder(self.server.runs_dir, launch_id)
         except LaunchError as error:
             raise _NotFound(str(error)) from error
-        if not (folder / LAUNCH_FILE).is_file():
-            raise _NotFound(f"no launch '{launch_id}'")
         return launch_id
 
     def _load(self, run_id: str) -> RunRecord:

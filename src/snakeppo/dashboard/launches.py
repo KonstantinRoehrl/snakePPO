@@ -307,17 +307,13 @@ def stop_sweep(launch_id: str, *, runs_dir: Path, grace: float = STOP_GRACE_SECO
 
 def launch_folder(runs_dir: Path, launch_id: str) -> Path:
     """The folder of launch ``launch_id``; LaunchError unless it is a launch of ``runs_dir``."""
-    base = runs_dir / processes.LAUNCHES_DIR
-    candidate = processes.launch_dir(runs_dir, launch_id)
-    is_child = (
-        launch_id not in ("", ".", "..")
-        and "/" not in launch_id
-        and "\\" not in launch_id
-        and candidate.parent.resolve() == base.resolve()
-    )
-    if not is_child or not (candidate / LAUNCH_FILE).is_file():
+    base = os.path.realpath(runs_dir / processes.LAUNCHES_DIR)
+    folder = os.path.realpath(os.path.join(base, launch_id))
+    if not folder.startswith(base + os.sep) or os.path.dirname(folder) != base:
         raise LaunchError(f"no launch '{launch_id}'")
-    return candidate
+    if not os.path.isfile(os.path.join(folder, LAUNCH_FILE)):
+        raise LaunchError(f"no launch '{launch_id}'")
+    return Path(folder)
 
 
 # ------------------------------------------------------------------ helpers
