@@ -1,2 +1,214 @@
-/* Replay view (replay.js, board.js): the toolbar, the board cards and their stats. Colours come
-   from the tokens in style.css. */
+/* The Replay tab: toolbar, board cards and the board colours board.js draws with. The board is
+   a dark playing field in both themes; keep the three token blocks in sync. */
+
+:root {
+  --board-bg: #101318;
+  --board-grid: #1b2029;
+  --wall: #3a404b;
+  --food: #e5484d;
+  --head: #9af0a6;
+  --snake-near: #3fbf55;
+  --snake-tail: #1d5a2a;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --board-bg: #101318;
+    --board-grid: #1b2029;
+    --wall: #3a404b;
+    --food: #e5484d;
+    --head: #9af0a6;
+    --snake-near: #3fbf55;
+    --snake-tail: #1d5a2a;
+  }
+}
+
+:root[data-theme="dark"] {
+  --board-bg: #101318;
+  --board-grid: #1b2029;
+  --wall: #3a404b;
+  --food: #e5484d;
+  --head: #9af0a6;
+  --snake-near: #3fbf55;
+  --snake-tail: #1d5a2a;
+}
+
+/* ------------------------------------------------------------------ toolbar */
+.replay-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem 0.75rem;
+  padding: 0.6rem 0.75rem;
+}
+
+.replay-speed {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.replay-hint {
+  margin-left: auto;
+  font-size: var(--text-sm);
+}
+
+.replay-status {
+  min-width: 6rem;
+  font-size: var(--text-sm);
+}
+
+.replay-notice {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem 1rem;
+  margin-bottom: 1rem;
+}
+
+/* ------------------------------------------------------------------ boards */
+.replay-boards {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1rem;
+}
+
+.replay-board {
+  display: grid;
+  gap: 0.6rem;
+  min-width: 0;
+  padding: 0.75rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+  box-shadow: var(--shadow);
+}
+
+.replay-board-head,
+.replay-board-options {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.replay-dot {
+  flex: none;
+  width: 0.75rem;
+  height: 0.75rem;
+  border-radius: 50%;
+}
+
+.replay-run {
+  flex: 1;
+  width: auto;
+  min-width: 0;
+}
+
+.replay-remove {
+  flex: none;
+}
+
+.replay-size-field {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.replay-size {
+  width: auto;
+}
+
+.replay-note {
+  font-size: var(--text-sm);
+}
+
+.replay-canvas {
+  display: block;
+  width: 100%;
+  aspect-ratio: 1;
+  border-radius: var(--radius);
+  background: var(--board-bg);
+}
+
+.replay-stats {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 0.4rem;
+}
+
+.replay-stat {
+  display: grid;
+  gap: 0.1rem;
+  min-width: 0;
+  padding: 0.3rem 0.45rem;
+  border-radius: var(--radius);
+  background: var(--surface-2);
+}
+
+.replay-stat-label {
+  overflow: hidden;
+  color: var(--ink-2);
+  font-size: var(--text-xs);
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.replay-stat-value {
+  font-size: var(--text-lg);
+  font-weight: 650;
+}
+
+.replay-add {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.4rem;
+  min-height: 18rem;
+  padding: 1rem;
+  border: 1px dashed var(--line-strong);
+  border-radius: var(--radius-lg);
+  background: transparent;
+  color: var(--ink);
+  cursor: pointer;
+  transition: background-color var(--speed) var(--ease-out);
+}
+
+.replay-add:hover {
+  background: var(--surface-2);
+}
+
+.replay-add:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.replay-add-title {
+  font-size: var(--text-lg);
+  font-weight: 650;
+}
+
+.replay-add-hint {
+  font-size: var(--text-sm);
+}
+
+/* ------------------------------------------------------------------ narrow screens */
+@media (max-width: 760px) {
+  .replay-boards {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .replay-hint {
+    margin-left: 0;
+  }
+
+  .replay-stats {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .replay-add {
+    min-height: 8rem;
+  }
+}
