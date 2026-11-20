@@ -108,10 +108,16 @@ def _parser() -> argparse.ArgumentParser:
     results.add_argument("--baseline", metavar="GROUP", help="compare every group with GROUP")
     results.add_argument("--format", choices=FORMATS, default="text")
 
-    serve = commands.add_parser("serve", help="open the read-only local dashboard")
+    serve = commands.add_parser("serve", help="open the local dashboard (main UI)")
     serve.add_argument("--runs-dir", type=Path, default=Path("runs"))
     serve.add_argument("--port", type=int, default=DEFAULT_PORT)
     serve.add_argument("--open", action="store_true", help="open the dashboard in the browser")
+    serve.add_argument(
+        "--configs-dir",
+        type=Path,
+        metavar="PATH",
+        help="preset folder the Launch view offers (default: configs in this folder)",
+    )
     return parser
 
 
@@ -422,7 +428,7 @@ def _results(args: argparse.Namespace) -> int:
 def _serve(args: argparse.Namespace) -> int:
     from snakeppo.dashboard.server import serve
 
-    return serve(args.runs_dir, args.port, open_browser=args.open)
+    return serve(args.runs_dir, args.port, open_browser=args.open, configs_dir=args.configs_dir)
 
 
 def main(argv: Sequence[str] | None = None) -> int:

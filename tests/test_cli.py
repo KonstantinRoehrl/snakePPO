@@ -150,6 +150,20 @@ def test_serve_binds_localhost_opens_the_browser_and_stops_on_ctrl_c(tmp_path, m
     assert "Stopped the dashboard." in out
 
 
+def test_serve_passes_the_configs_folder_and_says_it_is_the_main_ui(monkeypatch, capsys):
+    from snakeppo.dashboard import server
+
+    calls = []
+    monkeypatch.setattr(server, "serve", lambda *args, **kwargs: calls.append((args, kwargs)) or 0)
+    assert main(["serve", "--runs-dir", "r", "--port", "0", "--configs-dir", "presets"]) == 0
+    assert calls == [((Path("r"), 0), {"open_browser": False, "configs_dir": Path("presets")})]
+    assert main(["serve"]) == 0
+    assert calls[-1][1]["configs_dir"] is None
+    with pytest.raises(SystemExit):
+        main(["--help"])
+    assert "open the local dashboard (main UI)" in capsys.readouterr().out
+
+
 def test_serve_reports_a_busy_port(tmp_path, capsys):
     from snakeppo.dashboard.server import make_server
 
