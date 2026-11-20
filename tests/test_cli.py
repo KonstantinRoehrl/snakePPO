@@ -5,6 +5,8 @@ import torch
 
 from snakeppo.agents import PolicyPlayer, available_agents
 from snakeppo.cli import main
+from snakeppo.config import load_config
+from snakeppo.results import truncate
 from snakeppo.runs import load_checkpoint
 
 SMOKE = Path(__file__).resolve().parents[1] / "configs" / "smoke.yaml"
@@ -74,7 +76,10 @@ def test_train_eval_compare_round_trip(tmp_path, capsys):
     assert "(stochastic)" in capsys.readouterr().out
 
     assert main(["compare", str(tmp_path)]) == 0
-    assert run_dir.name in capsys.readouterr().out
+    header, line = capsys.readouterr().out.splitlines()
+    assert header.split()[-1] == "description" and run_dir.name in line
+    # --name does not change the description: it comes from the preset file
+    assert line.rstrip().endswith(truncate(load_config(SMOKE).train.description))
 
 
 def test_config_errors_are_reported_without_a_traceback(tmp_path, capsys):
@@ -109,6 +114,7 @@ def test_results_judges_groups_in_every_format(tmp_path, capsys):
     assert "ppo.target_kl=0.0001" in kl_line and " base " in kl_line
     base_line = next(line for line in text.splitlines() if line.startswith("base "))
     assert base_line.rstrip().endswith("reference")
+    assert truncate(load_config(SMOKE).train.description) in base_line
     assert main(["results", str(tmp_path), "--format", "csv"]) == 0
     assert capsys.readouterr().out.startswith("group,train.total_env_steps")
     assert main(["results", str(tmp_path), "--baseline", "kl", "--format", "markdown"]) == 0
@@ -354,3 +360,71 @@ def test_sweep_builds_the_network_once_before_any_seed_starts(
     assert f"snakeppo sweep: error: {message}" in err
     assert "Traceback" not in err
     assert list(tmp_path.iterdir()) == []
+
+
+def _saved_description(monkeypatch, *args):
+    """The train.description ``snakeppo train --config smoke.yaml ARGS`` would save, untrained."""
+    from snakeppo.ppo import trainer
+
+    configs = []
+    monkeypatch.setattr(trainer, "train", lambda config, **kwargs: configs.append(config))
+    assert main(["train", "--config", str(SMOKE), *args]) == 0
+    (config,) = configs
+    return config.train.description
+
+
+@pytest.mark.parametrize(
+    ("args", "suffix"),
+    [
+        ((), ""),
+        (
+            ("--seed", "3", "--name", "x", "--group", "g", "--set", "train.runs_dir=elsewhere"),
+            "",
+        ),
+        (
+            ("--set", "ppo.lr=0.0005", "--set", " train.total_env_steps=1024 ", "--agent", "mlp"),
+            " Changed: ppo.lr=0.0005, train.total_env_steps=1024, agent.name=mlp",
+        ),
+    ],
+    ids=["preset", "bookkeeping-only", "changes"],
+)
+def test_train_saves_the_preset_description_with_its_changes(monkeypatch, args, suffix):
+    preset = load_config(SMOKE).train.description
+    assert _saved_description(monkeypatch, *args) == preset + suffix
+
+
+@pytest.mark.parametrize(
+    ("args", "expected"),
+    [
+        (("--set", "ppo.lr=0.0005", "--set", "train.description=Plain text."), "Plain text."),
+        (("--set", "ppo.lr=0.0005", "--description", "My # note: yes"), "My # note: yes"),
+        (("--description=-starts with a dash",), "-starts with a dash"),
+        (("--description", ""), ""),
+    ],
+    ids=["set", "flag-verbatim", "flag-dash", "flag-empty"],
+)
+def test_an_explicit_description_wins_without_a_suffix(monkeypatch, args, expected):
+    assert _saved_description(monkeypatch, *args) == expected
+
+
+def test_resume_refuses_a_description(tmp_path, capsys):
+    assert main(["train", "--resume", str(tmp_path), "--description", "x"]) == 2
+    assert "cannot be combined with --description" in capsys.readouterr().err
+
+
+def test_sweep_gives_every_seed_its_description(tmp_path, monkeypatch):
+    from snakeppo import sweep
+
+    seen = []
+
+    def run_sweep(seeds, train_args, **kwargs):
+        seen.append(list(train_args))
+        return []
+
+    monkeypatch.setattr(sweep, "run_sweep", run_sweep)
+    args = ["sweep", "--seeds", "1,2", "--config", str(SMOKE)]
+    args += ["--set", f"train.runs_dir={tmp_path.as_posix()}"]
+    assert main([*args, "--description", "-a dash # and: colon"]) == 0
+    assert seen[-1][-1] == "--description=-a dash # and: colon"
+    assert main(args) == 0
+    assert not any(arg.startswith("--description") for arg in seen[-1])

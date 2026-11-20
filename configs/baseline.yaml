@@ -46,6 +46,10 @@ train:
   deterministic: false
   checkpoint_interval: 10
   group: null
+  description: >-
+    The plain reference: standard PPO with the default network, reward and view of the board.
+    Every other preset changes one thing from it, so its runs show whether that one change
+    helps.
 curriculum:
   grow: 'off'  # quoted: YAML reads a bare off as false
   stages: 5

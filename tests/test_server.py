@@ -7,12 +7,13 @@ from datetime import datetime
 import pytest
 
 from snakeppo.builders import observation_record
-from snakeppo.config import Config, apply_overrides, save_config
-from snakeppo.dashboard.api import json_safe
+from snakeppo.config import Config, Preset, apply_overrides, save_config
+from snakeppo.dashboard.api import json_safe, results_payload, run_summary
 from snakeppo.dashboard.server import make_server, serve
 from snakeppo.runs import (
     MetricsLogger,
     create_run_dir,
+    load_run,
     truncate_metrics,
     update_run_info,
     write_run_info,
@@ -99,10 +100,23 @@ def test_run_list_and_detail(dashboard):
     assert listed["id"] == finished.name and listed["group"] == "g@1" and listed["seed"] == 1
     assert listed["status"] == "finished" and listed["update"] == 3 and listed["total_updates"] == 3
     assert listed["score"] == 2.0 and listed["switches"] == {"ppo.target_kl": 0.02}
+    assert listed["description"] == ""
     assert 0 <= listed["quiet_seconds"] < 60 and listed["stall_seconds"] >= 60
     detail = _json(server, f"/api/runs/{finished.name}")
     assert detail["run"]["id"] == finished.name
     assert detail["config"]["ppo"]["target_kl"] == 0.02 and detail["info"]["agent"] == "cnn"
+
+
+def test_summaries_and_results_show_the_stored_or_the_preset_description(tmp_path):
+    presets = [Preset("rewards/x.yaml", "reward-x", "From the preset.")]
+    old = load_run(_run(tmp_path, "g@1", 1, "train.name=reward-x"))
+    stored = load_run(_run(tmp_path, "g@2", 2, "train.description=Stored."))
+    assert run_summary(old, presets=presets)["description"] == "From the preset."
+    assert run_summary(old)["description"] == ""
+    assert run_summary(stored, presets=presets)["description"] == "Stored."
+    rows = {row["group"]: row for row in results_payload([old, stored], None, presets)["rows"]}
+    assert rows["g@1"]["description"] == "From the preset."
+    assert rows["g@2"]["description"] == "Stored."
 
 
 def test_an_unreadable_run_is_reported_not_fatal(dashboard):

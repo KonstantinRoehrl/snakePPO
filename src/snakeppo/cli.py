@@ -20,12 +20,25 @@ from snakeppo.builders import (
     make_policy,
     resolve_device,
 )
-from snakeppo.config import Config, ConfigError, EnvConfig, config_from_dict, load_config, validate
+from snakeppo.config import (
+    DEFAULT_CONFIGS_DIR,
+    Config,
+    ConfigError,
+    EnvConfig,
+    Preset,
+    config_from_dict,
+    describe_changes,
+    list_presets,
+    load_config,
+    run_description,
+    validate,
+)
 from snakeppo.dashboard.server import DEFAULT_PORT
 from snakeppo.evaluation import evaluate
-from snakeppo.results import FORMATS, format_results, results_table
+from snakeppo.results import BOOKKEEPING_KEYS, FORMATS, format_results, results_table, truncate
 from snakeppo.rewards import REWARDS, available_rewards
 from snakeppo.runs import (
+    CONFIG_FILE,
     find_runs,
     load_checkpoint,
     load_run,
@@ -108,6 +121,12 @@ def _experiment_options(parser: argparse.ArgumentParser) -> None:
         help="override one config value; repeatable",
     )
     parser.add_argument("--name", help="run name used in the run folder name")
+    parser.add_argument(
+        "--description",
+        metavar="TEXT",
+        help="plain-language note saved with the run, for people only "
+        "(default: the preset's, plus the options changed here)",
+    )
 
 
 def _experiment_config(args: argparse.Namespace, overrides: Sequence[str]) -> Config:
@@ -117,7 +136,28 @@ def _experiment_config(args: argparse.Namespace, overrides: Sequence[str]) -> Co
         config = validate(replace(config, agent=replace(config.agent, name=args.agent)))
     if args.name:
         config = validate(replace(config, train=replace(config.train, name=args.name)))
-    return config
+    description = _description(args, overrides, config.train.description)
+    return validate(replace(config, train=replace(config.train, description=description)))
+
+
+def _description(args: argparse.Namespace, overrides: Sequence[str], loaded: str) -> str:
+    """``--description`` verbatim, else an explicit ``--set train.description``, else the
+    loaded (preset) text plus the learning changes made on this command line."""
+    if args.description is not None:
+        return args.description
+    keys = [override.partition("=")[0].strip() for override in overrides]
+    if "train.description" in keys:
+        return loaded
+    # bookkeeping (seed, name, group, runs folder, ...) is left out, so every seed of a sweep
+    # gets the same text
+    changes = [
+        override.strip()
+        for override, key in zip(overrides, keys, strict=True)
+        if key not in BOOKKEEPING_KEYS
+    ]
+    if args.agent:
+        changes.append(f"agent.name={args.agent}")
+    return describe_changes(loaded, changes)
 
 
 def _seed_list(text: str) -> list[int]:
@@ -142,6 +182,7 @@ def _train(args: argparse.Namespace) -> int:
                 ("--name", args.name),
                 ("--seed", args.seed),
                 ("--group", args.group),
+                ("--description", args.description),
             )
             if value not in (None, [])
         ]
@@ -285,9 +326,13 @@ def _compare(args: argparse.Namespace) -> int:
         joined = ", ".join(str(p) for p in args.paths)
         print(f"No run folders found in {joined}.")
         return 1
-    rows = [summarize_run(run) for run in runs]
+    presets = list_presets(DEFAULT_CONFIGS_DIR)
+    rows = [
+        summarize_run(run) | {"description": truncate(_run_description(run, presets)) or None}
+        for run in runs
+    ]
     rows.sort(key=lambda r: -1e9 if r["best_eval"] is None else r["best_eval"], reverse=True)
-    header = ("run", "agent", "seed", "env_steps", "best_eval", "last_eval")
+    header = ("run", "agent", "seed", "env_steps", "best_eval", "last_eval", "description")
     table = [header] + [
         tuple(
             "-" if row[k] is None else f"{row[k]:.2f}" if "eval" in k else str(row[k])
@@ -299,6 +344,16 @@ def _compare(args: argparse.Namespace) -> int:
     for line in table:
         print("  ".join(cell.ljust(width) for cell, width in zip(line, widths, strict=True)))
     return 0
+
+
+def _run_description(run_dir: Path, presets: Sequence[Preset]) -> str:
+    """The run's description; empty when its saved config no longer loads (compare reads the
+    other columns from the raw file, so such a run still gets its row)."""
+    try:
+        config = load_config(run_dir / CONFIG_FILE)
+    except ConfigError:
+        return ""
+    return run_description(config, presets)
 
 
 def _sweep(args: argparse.Namespace) -> int:
@@ -314,6 +369,9 @@ def _sweep(args: argparse.Namespace) -> int:
     for flag, value in (("--agent", args.agent), ("--name", args.name)):
         if value:
             train_args += [flag, value]
+    if args.description is not None:
+        # one token, so a text that starts with "-" is not read as an option
+        train_args.append(f"--description={args.description}")
     group = group_id(config.train.name)
     seeds = ", ".join(map(str, args.seeds))
     print(f"Sweep {group}: seeds {seeds}, {args.jobs} at a time")
@@ -334,7 +392,8 @@ def _results(args: argparse.Namespace) -> int:
         joined = ", ".join(str(p) for p in args.paths)
         print(f"No run folders found in {joined}.")
         return 1
-    table = results_table([load_run(run) for run in runs], args.baseline)
+    presets = list_presets(DEFAULT_CONFIGS_DIR)
+    table = results_table([load_run(run) for run in runs], args.baseline, presets)
     if not table.rows:
         print(
             f"No seed groups found ({table.left_out} ungrouped run(s)); "

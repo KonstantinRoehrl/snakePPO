@@ -18,10 +18,17 @@ from typing import Any
 
 import numpy as np
 
-from snakeppo.config import STRATEGY_PARAMETERS, Config, CurriculumConfig, config_to_dict
+from snakeppo.config import (
+    STRATEGY_PARAMETERS,
+    Config,
+    CurriculumConfig,
+    Preset,
+    config_to_dict,
+    run_description,
+)
 from snakeppo.runs import RunRecord
 
-# Keys that name, place or schedule a run without changing what it learns.
+# Keys that name, place, schedule or describe a run without changing what it learns.
 BOOKKEEPING_KEYS = frozenset(
     {
         "env.seed",
@@ -31,6 +38,7 @@ BOOKKEEPING_KEYS = frozenset(
         "train.device",
         "train.deterministic",
         "train.checkpoint_interval",
+        "train.description",
     }
 )
 # Keys that set the budget and how runs are measured: shown as the budget, never a switch.
@@ -51,6 +59,7 @@ MIN_PAIRED_SEEDS = 3
 BOOTSTRAP_RESAMPLES = 10_000
 BOOTSTRAP_SEED = 0
 FORMATS = ("text", "markdown", "csv")
+DESCRIPTION_WIDTH = 48  # characters of a description the text tables show
 
 
 # ------------------------------------------------------------------ configs
@@ -186,6 +195,7 @@ class GroupRow:
     """One line of the results table."""
 
     group: str
+    description: str  # the group's first run's; information only, never compared
     protocol: dict[str, Any]
     finished: int
     seeds: int
@@ -214,8 +224,13 @@ class ResultsTable:
     baseline: str | None  # the forced reference group, if any
 
 
-def results_table(runs: Sequence[RunRecord], baseline: str | None = None) -> ResultsTable:
-    """Group runs by ``group`` and judge each group against its reference group."""
+def results_table(
+    runs: Sequence[RunRecord], baseline: str | None = None, presets: Sequence[Preset] = ()
+) -> ResultsTable:
+    """Group runs by ``group`` and judge each group against its reference group.
+
+    ``presets`` give runs saved before descriptions existed their preset's description.
+    """
     by_id: dict[str, list[RunRecord]] = {}
     for run in runs:
         if run.group is not None:
@@ -229,7 +244,7 @@ def results_table(runs: Sequence[RunRecord], baseline: str | None = None) -> Res
         known = ", ".join(sorted(by_id)) or "none"
         raise ValueError(f"unknown baseline group '{baseline}'; groups: {known}")
     forced = next((g for g in groups if g.id == baseline), None)
-    rows = [_row(group, _reference_for(group, groups, forced)) for group in groups]
+    rows = [_row(group, _reference_for(group, groups, forced), presets) for group in groups]
     left_out = sum(1 for run in runs if run.group is None)
     return ResultsTable(rows, left_out, baseline)
 
@@ -245,7 +260,7 @@ def _reference_for(group: _Group, groups: list[_Group], forced: _Group | None) -
     return next(same_protocol, None)  # groups are sorted newest first
 
 
-def _row(group: _Group, reference: _Group | None) -> GroupRow:
+def _row(group: _Group, reference: _Group | None, presets: Sequence[Preset]) -> GroupRow:
     scores = group.finished_scores()
     values = list(scores.values())
     notes = [
@@ -255,6 +270,7 @@ def _row(group: _Group, reference: _Group | None) -> GroupRow:
     ]
     base = {
         "group": group.id,
+        "description": run_description(group.config, presets),
         "protocol": protocol(group.config),
         "finished": len(group.finished),
         "seeds": len(group.runs),
@@ -308,14 +324,29 @@ def _row(group: _Group, reference: _Group | None) -> GroupRow:
 
 
 # ------------------------------------------------------------------ formatting
-COLUMNS = ("group", "budget", "seeds", "score", "reference", "differences", "vs reference")
+COLUMNS = (
+    "group",
+    "description",
+    "budget",
+    "seeds",
+    "score",
+    "reference",
+    "differences",
+    "vs reference",
+)
+
+
+def truncate(text: str, width: int = DESCRIPTION_WIDTH) -> str:
+    """``text`` on one line, cut to ``width`` characters with an ellipsis when longer."""
+    line = " ".join(text.split())
+    return line if len(line) <= width else line[: width - 1].rstrip() + "…"
 
 
 def _number(value: float | None) -> str:
     return "-" if value is None else f"{value:.2f}"
 
 
-def _cells(row: GroupRow) -> tuple[str, ...]:
+def _cells(row: GroupRow, fmt: str) -> tuple[str, ...]:
     score = _number(row.score_mean)
     if row.score_std is not None:
         score += f" ± {row.score_std:.2f}"
@@ -328,8 +359,13 @@ def _cells(row: GroupRow) -> tuple[str, ...]:
         judged = (
             f"{row.verdict}: {row.mean_difference:+.2f} [{row.ci_low:+.2f}, {row.ci_high:+.2f}]"
         )
+    if fmt == "text":
+        description = truncate(row.description)
+    else:  # markdown: one table row, so no line breaks and no bare cell separators
+        description = " ".join(row.description.split()).replace("|", r"\|")
     return (
         row.group,
+        description or "-",
         f"{row.budget:,}",
         f"{row.finished}/{row.seeds}",
         score,
@@ -357,7 +393,7 @@ def format_results(table: ResultsTable, fmt: str = "text") -> str:
         raise ValueError(f"format must be one of {', '.join(FORMATS)}, got {fmt!r}")
     if fmt == "csv":
         return _csv(table)
-    cells = [COLUMNS, *(_cells(row) for row in table.rows)]
+    cells = [COLUMNS, *(_cells(row, fmt) for row in table.rows)]
     if fmt == "markdown":
         body = ["| " + " | ".join(line) + " |" for line in cells]
         body.insert(1, "|" + "|".join(" --- " for _ in COLUMNS) + "|")
@@ -391,6 +427,7 @@ def _csv(table: ResultsTable) -> str:
             "ci_high",
             "paired_seeds",
             "unpaired_seeds",
+            "description",
         ]
     )
     for row in table.rows:
@@ -411,6 +448,7 @@ def _csv(table: ResultsTable) -> str:
                 row.ci_high,
                 " ".join(map(str, row.paired_seeds)),
                 " ".join(map(str, row.unpaired_seeds)),
+                row.description,
             ]
         )
     return out.getvalue()

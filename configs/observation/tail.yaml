@@ -5,3 +5,6 @@ observation:
   tail: true
 train:
   name: observation-tail
+  description: >-
+    Marks the tail and the cell it moves into next, so the snake knows which cells will free up
+    and can follow its own tail safely.

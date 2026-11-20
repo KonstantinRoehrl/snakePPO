@@ -12,7 +12,7 @@ from collections.abc import Sequence
 from dataclasses import asdict
 from typing import Any
 
-from snakeppo.config import config_to_dict
+from snakeppo.config import Preset, config_to_dict, run_description
 from snakeppo.results import (
     config_differences,
     learning_config,
@@ -40,8 +40,10 @@ def json_safe(value: Any) -> Any:
     return value
 
 
-def run_summary(record: RunRecord, now: float | None = None) -> dict[str, Any]:
-    """One run-list entry: identity, status, progress, freshness, score and switches.
+def run_summary(
+    record: RunRecord, now: float | None = None, presets: Sequence[Preset] = ()
+) -> dict[str, Any]:
+    """One run-list entry: identity, description, status, progress, freshness, score and switches.
 
     ``quiet_seconds`` is measured here rather than in the browser so the page needs no clock
     of its own and sees the same silence the stall rule sees.
@@ -52,6 +54,7 @@ def run_summary(record: RunRecord, now: float | None = None) -> dict[str, Any]:
         "id": record.id,
         "name": info.get("name"),
         "group": record.group,
+        "description": run_description(record.config, presets),
         "seed": record.seed,
         "agent": info.get("agent"),
         "device": info.get("device"),
@@ -84,8 +87,10 @@ def metrics_payload(chunk: MetricsChunk) -> dict[str, Any]:
     return {"lines": chunk.lines, "offset": chunk.offset, "reset": chunk.reset}
 
 
-def results_payload(records: Sequence[RunRecord], baseline: str | None) -> dict[str, Any]:
-    table = results_table(records, baseline)
+def results_payload(
+    records: Sequence[RunRecord], baseline: str | None, presets: Sequence[Preset] = ()
+) -> dict[str, Any]:
+    table = results_table(records, baseline, presets)
     rows = [asdict(row) | {"budget": row.budget} for row in table.rows]
     return {"rows": rows, "left_out": table.left_out, "baseline": table.baseline}
 

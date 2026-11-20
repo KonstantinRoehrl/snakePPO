@@ -31,6 +31,7 @@ STRATEGY_PARAMETERS = (
 )
 OBSERVATION_BODIES = ("binary", "order")
 OBSERVATION_VIEWS = ("full", "local")
+DEFAULT_CONFIGS_DIR = Path("configs")
 
 
 class ConfigError(ValueError):
@@ -96,6 +97,7 @@ class TrainConfig:
     deterministic: bool = False
     checkpoint_interval: int = 10
     group: str | None = None
+    description: str = ""  # information for people only; nothing reads it to set a value
 
 
 @dataclass
@@ -269,6 +271,48 @@ def load_config(path: str | Path | None = None, overrides: Sequence[str] = ()) -
             raise ConfigError(f"{path} must contain a mapping of config sections")
         config = config_from_dict(data, base=config)
     return apply_overrides(config, overrides)
+
+
+@dataclass(frozen=True)
+class Preset:
+    """A preset file under the configs folder, as listings and the launch panel show it."""
+
+    path: str  # posix path relative to the configs folder, e.g. "rewards/distance.yaml"
+    name: str  # its train.name
+    description: str  # its train.description
+
+
+def list_presets(configs_dir: str | Path = DEFAULT_CONFIGS_DIR) -> list[Preset]:
+    """Every ``*.yaml`` under ``configs_dir``, recursively, sorted by path; ``[]`` without it."""
+    root = Path(configs_dir)
+    if not root.is_dir():
+        return []
+    presets = []
+    for relative in sorted(found.relative_to(root).as_posix() for found in root.rglob("*.yaml")):
+        path = root / relative
+        try:
+            train = load_config(path).train
+        except (ConfigError, yaml.YAMLError) as error:
+            raise ConfigError(f"preset {path.as_posix()} does not load: {error}") from error
+        presets.append(Preset(relative, train.name, train.description))
+    return presets
+
+
+def preset_description(name: str, presets: Sequence[Preset]) -> str:
+    """The description of the first preset whose ``train.name`` is ``name``, else ``""``."""
+    return next((preset.description for preset in presets if preset.name == name), "")
+
+
+def run_description(config: Config, presets: Sequence[Preset] = ()) -> str:
+    """A run's description: the stored one, else (runs from before descriptions) its preset's."""
+    return config.train.description or preset_description(config.train.name, presets)
+
+
+def describe_changes(description: str, changes: Sequence[str]) -> str:
+    """``description`` plus ``Changed: key=value, ...`` listing ``changes`` in the order given."""
+    if not changes:
+        return description
+    return f"{description} Changed: {', '.join(changes)}".strip()
 
 
 def save_config(config: Config, path: str | Path) -> None:

@@ -5,3 +5,6 @@ observation:
   hunger: true
 train:
   name: observation-hunger
+  description: >-
+    Adds an input that shows how long ago the snake last ate, so it can sense when it is close
+    to starving.

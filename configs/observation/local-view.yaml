@@ -6,3 +6,6 @@ observation:
   view: local
 train:
   name: observation-local-view
+  description: >-
+    Shows only an 11x11 window around the head instead of the whole board; a smaller picture may
+    be easier to learn from, and the model can play any board size.

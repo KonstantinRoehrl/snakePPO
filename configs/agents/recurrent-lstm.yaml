@@ -7,3 +7,6 @@ agent:
     cell: lstm
 train:
   name: agent-recurrent-lstm
+  description: >-
+    Gives the network a memory like the recurrent preset, but an LSTM instead of a GRU, to see
+    whether the kind of memory matters.

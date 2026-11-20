@@ -14,11 +14,16 @@ from snakeppo.config import (
     CurriculumConfig,
     CurriculumStage,
     ObservationConfig,
+    Preset,
     apply_overrides,
     config_from_dict,
     config_to_dict,
     curriculum_ladder,
+    describe_changes,
+    list_presets,
     load_config,
+    preset_description,
+    run_description,
     save_config,
     total_updates,
 )
@@ -111,8 +116,11 @@ PRESETS = Path(__file__).resolve().parents[1] / "configs"
 
 
 def test_baseline_preset_states_exactly_the_code_defaults():
-    expected = apply_overrides(Config(), ["train.name=baseline"])
-    assert load_config(PRESETS / "baseline.yaml") == expected
+    config = load_config(PRESETS / "baseline.yaml")
+    # the description is information for people, the one value the code default leaves empty
+    assert config.train.description
+    plain = dataclasses.replace(config, train=dataclasses.replace(config.train, description=""))
+    assert plain == apply_overrides(Config(), ["train.name=baseline"])
 
 
 def test_baseline_preset_names_every_config_key():
@@ -145,8 +153,8 @@ def _preset_id(path):
 
 
 @pytest.mark.parametrize("path", sorted(PRESETS.glob("**/*.yaml")), ids=_preset_id)
-def test_every_preset_loads(path):
-    load_config(path)
+def test_every_preset_loads_and_describes_itself(path):
+    assert load_config(path).train.description.strip()
 
 
 # The switch every preset in a folder turns on; each observation preset turns on its own key.
@@ -168,6 +176,48 @@ def test_every_folder_preset_turns_on_one_switch(path):
     else:
         assert units == {FOLDER_SWITCHES[folder]}
     assert config.train.name.startswith(folder.removesuffix("s"))
+
+
+def test_list_presets_reads_every_preset_sorted_by_path(tmp_path):
+    presets = list_presets(PRESETS)
+    assert [p.path for p in presets] == sorted(_preset_id(p) for p in PRESETS.glob("**/*.yaml"))
+    distance = next(p for p in presets if p.path == "rewards/distance.yaml")
+    stored = load_config(PRESETS / "rewards" / "distance.yaml").train
+    assert distance == Preset("rewards/distance.yaml", "reward-distance", stored.description)
+    assert list_presets(tmp_path / "missing") == []
+
+
+def test_a_preset_that_does_not_load_is_named(tmp_path):
+    (tmp_path / "rewards").mkdir()
+    (tmp_path / "ok.yaml").write_text("train: {name: ok, description: Fine.}\n", "utf-8")
+    (tmp_path / "rewards" / "bad.yaml").write_text("ppo: {nope: 1}\n", "utf-8")
+    message = r"rewards/bad\.yaml does not load: unknown key 'ppo\.nope'"
+    with pytest.raises(ConfigError, match=message):
+        list_presets(tmp_path)
+
+
+def test_a_run_shows_its_stored_description_else_its_preset_s():
+    assert Config().train.description == ""
+    presets = [
+        Preset("a.yaml", "reward-x", "From the preset."),
+        Preset("b.yaml", "reward-x", "Not the first match."),
+    ]
+    assert preset_description("reward-x", presets) == "From the preset."
+    assert preset_description("other", presets) == ""
+    named = apply_overrides(Config(), ["train.name=reward-x"])
+    assert run_description(named, presets) == "From the preset."
+    assert run_description(named) == ""
+    stored = apply_overrides(named, ["train.description=Stored text."])
+    assert run_description(stored, presets) == "Stored text."
+
+
+def test_describe_changes_appends_the_changes_in_the_order_given():
+    assert describe_changes("Adds a hint.", []) == "Adds a hint."
+    assert (
+        describe_changes("Adds a hint.", ["ppo.lr=0.0005", "agent.name=mlp"])
+        == "Adds a hint. Changed: ppo.lr=0.0005, agent.name=mlp"
+    )
+    assert describe_changes("", ["ppo.lr=0.0005"]) == "Changed: ppo.lr=0.0005"
 
 
 def test_exponential_entropy_schedule_needs_a_positive_start_coefficient():

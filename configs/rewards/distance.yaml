@@ -6,3 +6,6 @@ reward:
   strategy: distance
 train:
   name: reward-distance
+  description: >-
+    Swaps the baseline's hint toward the apple for a simpler one: a small fixed reward for each
+    step closer and the same penalty for each step away.

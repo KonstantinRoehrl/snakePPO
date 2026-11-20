@@ -6,3 +6,6 @@ curriculum:
   grow: board
 train:
   name: curriculum-board
+  description: >-
+    Starts on a small 8x8 arena that widens step by step to the full board, so food is close at
+    first and early lessons come quicker.

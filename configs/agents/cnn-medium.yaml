@@ -5,3 +5,6 @@ agent:
   name: cnn-medium
 train:
   name: agent-cnn-medium
+  description: >-
+    Uses an image network about a quarter the size of the default one, to see whether a lighter
+    network learns as well or faster.
