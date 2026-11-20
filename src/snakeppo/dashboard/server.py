@@ -15,14 +15,21 @@ GET routes::
     /api/presets                    {"presets": [{"path", "name", "description"}],
                                      "bookkeeping_keys": [str], "configs_dir": str}
     /api/launches                   {"launches": [launch entry]}, newest first
+    /api/replay/<id>/stream         text/event-stream: "data: <frame JSON>" per step,
+                                     ": keepalive" while nothing moves, "event: end" at the close
 
-POST routes (202 Accepted: the work goes on in a detached process)::
+POST routes (launch, stop and resume answer 202 Accepted: the work goes on in a detached
+process; replay answers at once)::
 
     /api/launch                     body: a launch request; {"launch": entry}
     /api/runs/<id>/stop             {"ok": true}
     /api/runs/<id>/resume           {"launch": entry}
     /api/launches/<id>/stop         {"ok": true} (a sweep launch)
     /api/launches/<id>/resume       {"launch": entry} (a stopped sweep launch)
+    /api/replay                     body: {"boards": [{"run", "checkpoint"?, "greedy"?,
+                                     "board_size"?}], "speed"?: n}; 201 {"session": {...}},
+                                     ending any older session
+    /api/replay/<id>/control        body: {"action", "value"?}; 200 {"paused": bool, "speed": int}
 
 Every POST must come from the dashboard page itself: an ``Origin`` (or, without one, a
 ``Referer``) of this server and ``Content-Type: application/json``, or it gets 403 before any
@@ -77,6 +84,14 @@ from snakeppo.dashboard.launches import (
     stop_run,
     stop_sweep,
 )
+from snakeppo.dashboard.replay import (
+    DEFAULT_SPEED,
+    REPLAY_SPEEDS,
+    ReplayError,
+    ReplayManager,
+    ReplaySession,
+    parse_board_specs,
+)
 from snakeppo.runs import RUN_INFO_FILE, RunRecord, find_runs, load_run, read_metrics_since
 
 DEFAULT_PORT = 8765
@@ -93,6 +108,11 @@ _STATIC_NAME = re.compile(r"[A-Za-z0-9_-][A-Za-z0-9_.-]*")
 _ADDRESS_IN_USE = {errno.EADDRINUSE, getattr(errno, "WSAEADDRINUSE", errno.EADDRINUSE)}
 # Errors that make one run folder unreadable without making the whole listing fail.
 _UNREADABLE = (OSError, ValueError, KeyError, yaml.YAMLError)
+# A stream sends an SSE comment this often while no frame comes, so a page that went away is
+# noticed (the write fails) even while the replay is paused.
+STREAM_KEEPALIVE_SECONDS = 15.0
+# What writing to a page that closed its stream raises (Windows reports an aborted connection).
+_CLIENT_GONE = (BrokenPipeError, ConnectionResetError, ConnectionAbortedError)
 # A refused body is read up to this size so the client gets the error reply, not a reset.
 _DISCARD_LIMIT = 16 * MAX_BODY_BYTES
 
@@ -125,6 +145,7 @@ class DashboardServer(ThreadingHTTPServer):
         self.cwd = Path.cwd()
         self.configs_dir = self.cwd / (DEFAULT_CONFIGS_DIR if configs_dir is None else configs_dir)
         self.spawn = spawn
+        self.replays = ReplayManager()
         super().__init__((HOST, port), _Handler)
 
     @property
@@ -136,6 +157,10 @@ class DashboardServer(ThreadingHTTPServer):
         """The origins the dashboard page has when opened from this server."""
         port = self.server_address[1]
         return f"http://{HOST}:{port}", f"http://localhost:{port}"
+
+    def server_close(self) -> None:
+        self.replays.close()
+        super().server_close()
 
 
 def make_server(
@@ -316,6 +341,8 @@ class _Handler(BaseHTTPRequestHandler):
                 self._send_json(presets_payload(self._presets(), self.server.configs_dir))
             case ["api", "launches"]:
                 self._send_json({"launches": list_launches(self.server.runs_dir)})
+            case ["api", "replay", session_id, "stream"]:
+                self._stream_replay(self._replay(session_id))
             case _:
                 raise _NotFound(f"no route {'/' + '/'.join(parts)}")
 
@@ -341,6 +368,16 @@ class _Handler(BaseHTTPRequestHandler):
                 launch_id = self._launch_id(launch_id)
                 entry = resume_sweep(launch_id, configs_dir=server.configs_dir, **context)
                 self._send_json({"launch": entry}, HTTPStatus.ACCEPTED)
+            case ["api", "replay"]:
+                session = self._create_replay(body)
+                self._send_json({"session": session.describe()}, HTTPStatus.CREATED)
+            case ["api", "replay", session_id, "control"]:
+                session = self._replay(session_id)
+                try:
+                    result = session.control(body.get("action"), body.get("value"))
+                except ReplayError as error:
+                    raise _BadRequest(str(error)) from error
+                self._send_json(result)
             case _:
                 raise _NotFound(f"no route {'/' + '/'.join(parts)}")
 
@@ -456,6 +493,59 @@ class _Handler(BaseHTTPRequestHandler):
             return list_presets(self.server.configs_dir)
         except ConfigError:
             return []
+
+    # ------------------------------------------------------------ replay
+    def _create_replay(self, request: dict[str, Any]) -> ReplaySession:
+        speed = request.get("speed", DEFAULT_SPEED)
+        if type(speed) is not int or speed not in REPLAY_SPEEDS:
+            choices = ", ".join(str(choice) for choice in REPLAY_SPEEDS)
+            raise _BadRequest(
+                f"speed must be one of {choices} steps per second (0 = as fast as possible), "
+                f"got {speed!r}"
+            )
+        try:
+            specs = parse_board_specs(request.get("boards"))
+            boards = [(spec, self._run_dir(spec.run)) for spec in specs]
+            return self.server.replays.create(boards, speed=speed)
+        except ReplayError as error:
+            raise _BadRequest(str(error)) from error
+
+    def _replay(self, session_id: str) -> ReplaySession:
+        session = self.server.replays.get(session_id)
+        if session is None:
+            raise _NotFound(f"no replay session '{session_id}'; start a new one")
+        return session
+
+    def _stream_replay(self, session: ReplaySession) -> None:
+        """Server-Sent Events: one ``data:`` event per frame until the session or the page ends."""
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.end_headers()
+        self.close_connection = True  # no Content-Length: the stream ends when the socket does
+        session.attach()
+        try:
+            seq = -1  # the first frame sent is the newest one, whatever its number
+            while True:
+                frame = session.next_frame(seq, timeout=STREAM_KEEPALIVE_SECONDS)
+                if frame is None:
+                    self._write_event(": keepalive\n\n")
+                elif frame.get("closed"):
+                    self._write_event("event: end\ndata: {}\n\n")
+                    return
+                else:
+                    seq = frame["seq"]
+                    data = json.dumps(json_safe(frame), allow_nan=False)
+                    self._write_event(f"data: {data}\n\n")
+        except _CLIENT_GONE:
+            pass  # the page closed the stream; nothing is left to tell it
+        finally:
+            session.detach()
+
+    def _write_event(self, text: str) -> None:
+        self.wfile.write(text.encode("utf-8"))
+        self.wfile.flush()
 
     @staticmethod
     def _offset(query: dict[str, str]) -> int:
