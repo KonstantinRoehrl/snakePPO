@@ -32,7 +32,7 @@ colors:
   run-2: "#d9612b"
   run-3: "#16926b"
   run-4: "#9a46cf"
-  run-5: "#b9860f"
+  run-5: "#b07f0e"
   run-6: "#cf3f74"
   run-7: "#2f93b8"
   board-bg: "#101318"
