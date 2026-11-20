@@ -7,6 +7,7 @@ requires-python = ">=3.12,<3.13"
 dependencies = [
   "numpy>=2",
   "plotly>=7.1",
+  "psutil>=5.9",
   "pygame>=2.6",
   "pyyaml>=6",
   "tensorboard>=2.17",

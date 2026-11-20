@@ -86,7 +86,7 @@ def test_resume_refuses_a_schema_1_run(tmp_path, monkeypatch):
         resume(run_dir, progress=False)
 
 
-def test_resume_continues_a_schema_2_run_exactly_and_raises_it_to_schema_4(tmp_path, monkeypatch):
+def test_resume_continues_a_schema_2_run_exactly_and_raises_it_to_schema_5(tmp_path, monkeypatch):
     reference = train(_smoke_config(tmp_path / "reference"), progress=False)
     with monkeypatch.context() as patch:
         patch.setattr(runs, "SCHEMA_VERSION", 2)
@@ -96,8 +96,8 @@ def test_resume_continues_a_schema_2_run_exactly_and_raises_it_to_schema_4(tmp_p
 
     resume(run_dir, progress=False)
     assert _curve(run_dir) == _curve(reference)
-    assert read_run_info(run_dir)["schema_version"] == 4
-    assert load_checkpoint(run_dir / "checkpoints" / "last.pt")["schema_version"] == 4
+    assert read_run_info(run_dir)["schema_version"] == 5
+    assert load_checkpoint(run_dir / "checkpoints" / "last.pt")["schema_version"] == 5
 
 
 def _strip_observation(run_dir):
@@ -127,16 +127,16 @@ def test_a_schema_3_run_still_evaluates_and_resumes_exactly(tmp_path, monkeypatc
     resume(run_dir, progress=False)
     assert _curve(run_dir) == _curve(reference)
     info = read_run_info(run_dir)
-    assert info["schema_version"] == 4 and info["observation"] == SMOKE_RECORD
+    assert info["schema_version"] == 5 and info["observation"] == SMOKE_RECORD
     last = load_checkpoint(run_dir / "checkpoints" / "last.pt")
-    assert last["schema_version"] == 4 and last["observation"] == SMOKE_RECORD
+    assert last["schema_version"] == 5 and last["observation"] == SMOKE_RECORD
 
 
 def test_resume_refuses_a_schema_newer_than_it_knows(tmp_path, monkeypatch):
     run_dir = _interrupted_run(tmp_path, monkeypatch, after_update=3)
-    update_run_info(run_dir, schema_version=5)
+    update_run_info(run_dir, schema_version=6)
     with pytest.raises(
-        ResumeError, match=r"has schema 5, newer than this snakeppo can resume \(4\)"
+        ResumeError, match=r"has schema 6, newer than this snakeppo can resume \(5\)"
     ):
         resume(run_dir, progress=False)
 

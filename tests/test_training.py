@@ -71,17 +71,18 @@ def test_smoke_training_writes_a_complete_run_folder(tmp_path):
     assert load_checkpoint(run_dir / "checkpoints" / "last.pt")["update"] == 4
 
 
-def test_finished_run_records_schema_4_run_info_and_checkpoints(tmp_path):
+def test_finished_run_records_schema_5_run_info_and_checkpoints(tmp_path):
     run_dir = train(_smoke_config(tmp_path, "train.group=g@1"), progress=False)
     info = json.loads((run_dir / "run.json").read_text("utf-8"))
-    assert info["schema_version"] == 4
+    assert info["schema_version"] == 5
     assert info["observation"] == SMOKE_RECORD
     assert info["status"] == "finished"
     assert info["total_updates"] == 4
     assert info["group"] == "g@1"
     assert info["resumed"] == []
+    assert info["process"] is None and info["launch"] is None
     last = load_checkpoint(run_dir / "checkpoints" / "last.pt")
-    assert last["schema_version"] == 4 and last["update"] == 4 and last["env_steps"] == 512
+    assert last["schema_version"] == 5 and last["update"] == 4 and last["env_steps"] == 512
     assert last["observation"] == SMOKE_RECORD
     assert load_checkpoint(run_dir / "checkpoints" / "best.pt")["observation"] == SMOKE_RECORD
     assert {"best_eval", "wall_time", "rng", "env"} <= last.keys()

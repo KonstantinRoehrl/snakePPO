@@ -1,15 +1,18 @@
 """Run folders: layout, ``run.json``, the ``metrics.jsonl`` contract, status and checkpoints.
 
-Layout (schema version 4)::
+Layout (schema version 5)::
 
     <runs_dir>/<YYYY-MM-DD_HHMMSS>_<name>_seed<k>/
-        run.json  config.yaml  metrics.jsonl  tb/  checkpoints/{best,last}.pt
+        run.json  config.yaml  metrics.jsonl  tb/  checkpoints/{best,last}.pt  [stop-request]
 
-Schema 4 adds the ``observation`` record (channel names, spatial size, view) to ``run.json`` and
-every checkpoint, and a recurrent run's hidden state (``policy_state``) to its checkpoints.
-Readers accept schema-1 to 3 folders too; a schema-1 status is inferred (see
-:func:`derive_status`), and a folder without an ``observation`` record trained on the default
-observation. Schema 2, 3 and 4 runs can be resumed (:data:`RESUMABLE_SCHEMAS`).
+Schema 5 adds the ``process`` record (pid, creation time, host) of the process training the run,
+``null`` once it ended, and the ``launch`` id of the dashboard launch that started it, ``null``
+for a run started elsewhere, to ``run.json``. Schema 4 added the ``observation`` record (channel
+names, spatial size, view) to ``run.json`` and every checkpoint, and a recurrent run's hidden
+state (``policy_state``) to its checkpoints. Readers accept schema-1 to 4 folders too; a
+schema-1 status is inferred (see :func:`derive_status`), and a folder without an
+``observation`` record trained on the default observation. Schema 2 to 5 runs can be resumed
+(:data:`RESUMABLE_SCHEMAS`).
 """
 
 from __future__ import annotations
@@ -32,10 +35,11 @@ from torch import nn
 from torch.utils.tensorboard import SummaryWriter
 
 from snakeppo.config import Config, load_config, total_updates
+from snakeppo.processes import is_alive
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 # Schemas whose run folders and checkpoints hold everything an exact resume needs.
-RESUMABLE_SCHEMAS = (2, 3, 4)
+RESUMABLE_SCHEMAS = (2, 3, 4, 5)
 RUN_INFO_FILE = "run.json"
 CONFIG_FILE = "config.yaml"
 METRICS_FILE = "metrics.jsonl"
@@ -110,7 +114,11 @@ def write_run_info(
     total_updates: int,
     group: str | None,
     observation: Mapping[str, Any],
+    process: Mapping[str, Any] | None = None,
+    launch: str | None = None,
 ) -> dict[str, Any]:
+    """Write a new run's ``run.json``; ``process`` and ``launch`` are always written, ``null``
+    when not given."""
     info = {
         "schema_version": SCHEMA_VERSION,
         "name": name,
@@ -124,6 +132,8 @@ def write_run_info(
         "group": group,
         "observation": dict(observation),
         "resumed": [],
+        "process": None if process is None else dict(process),
+        "launch": launch,
     }
     write_json_atomic(run_dir / RUN_INFO_FILE, info)
     return info
@@ -270,17 +280,22 @@ def derive_status(
 ) -> str:
     """One of :data:`RUN_STATUSES`.
 
-    Schema 2 and later: the stored status, reported as ``stalled`` when it says ``running`` but
-    nothing was written for longer than :func:`stall_window`. Schema 1 stored no status:
-    ``finished`` when the last update reached the run's total, otherwise ``unknown``.
+    Schema 2 and later: the stored status, except that a stored ``running`` is reported as
+    ``stalled`` when its ``process`` record names a process that is gone, at once. Without a
+    record this host can judge (schema 2 to 4, or a record from another host), ``running`` turns
+    ``stalled`` once nothing was written for longer than :func:`stall_window`. Schema 1 stored no
+    status: ``finished`` when the last update reached the run's total, otherwise ``unknown``.
     """
     if "status" not in info:
         last = metrics[-1]["update"] if metrics else 0
         return "finished" if last == total_updates(config) else "unknown"
     status = info["status"]
-    if status == "running" and now - last_write > stall_window(metrics):
-        return "stalled"
-    return status
+    if status != "running":
+        return status
+    alive = is_alive(info.get("process"))
+    if alive is None:
+        alive = now - last_write <= stall_window(metrics)
+    return "running" if alive else "stalled"
 
 
 @dataclass(frozen=True)
