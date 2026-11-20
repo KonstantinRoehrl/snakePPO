@@ -193,6 +193,12 @@
   margin: 0 0 0.6rem;
 }
 
+/* The visually-hidden header labels are absolutely positioned; without a containing block here they
+   land in the page and widen its scrollable area instead of being clipped by the wrapper. */
+.launch-launches .table-wrap {
+  position: relative;
+}
+
 .launch-dot-cell {
   width: 1.5rem;
 }
