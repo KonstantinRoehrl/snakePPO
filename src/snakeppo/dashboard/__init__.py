@@ -1,1 +1,1 @@
-"""Read-only local web dashboard: ``snakeppo serve``. It never writes into a run folder."""
+"""Local web dashboard, the main UI (``snakeppo serve``); it never changes how a run learns."""

@@ -28,6 +28,10 @@ uv sync --no-group cuda --group cpu
 | `configs/agents/<name>.yaml` | Baseline with one other network: mlp, cnn-tiny, cnn-small, cnn-medium, recurrent, recurrent-lstm (`recurrent` with `cell: lstm`) or attention. |
 | `configs/observation/<switch>.yaml` | Baseline with one observation switch: body-order, tail, hunger or local-view. |
 
+Every preset carries a `train.description`: one or two plain sentences on what the run changes
+from the baseline and why that may help. The dashboard's Launch tab lists the presets with it;
+see Descriptions.
+
 ```sh
 uv run snakeppo train --config configs/baseline.yaml
 uv run snakeppo train --config configs/tuned.yaml --set ppo.target_kl=null --seed 1
@@ -40,9 +44,10 @@ Values are applied in this order, each step overriding the previous one:
 3. each `--set SECTION.KEY=VALUE`, in order (the value is parsed as YAML, so `null`,
    `true` and numbers work). The `--set` values are validated together after the last one, so
    their order does not matter;
-4. `--agent`, `--name`, `--seed` and `--group`, which set `agent.name`, `train.name`,
-   `env.seed` and `train.group` (`--agent`, `--name` and `--group` are plain text, so
-   `--name 2` and `--name off` work).
+4. `--agent`, `--name`, `--seed`, `--group` and `--description`, which set `agent.name`,
+   `train.name`, `env.seed`, `train.group` and `train.description` (`--agent`, `--name`,
+   `--group` and `--description` are plain text, so `--name 2` and `--name off` work).
+   `sweep` takes all of them but `--seed`, which it sets per seed.
 
 Unknown sections or keys and values of the wrong type are rejected with an error.
 
@@ -190,6 +195,30 @@ These keys never change what a run learns and never count as switches.
 | --- | --- | --- | --- |
 | `train.checkpoint_interval` | int ≥ 1 | `10` | Writes `last.pt` every N updates, plus on every eval update and the final update. |
 | `train.group` | text or `null` | `null` | The seed group the run belongs to; set by `snakeppo sweep` or `train --group`. |
+| `train.description` | text | `""` | What the run tries, in plain words, for people only; see Descriptions. Nothing reads it back to set a value. |
+
+## Descriptions
+
+`train.description` is saved with the run in `config.yaml` and shown in the dashboard (run list,
+Compare, Results and the Launch tab's preset picker) and in `snakeppo compare` and
+`snakeppo results`. The first of these that applies sets it:
+
+1. `--description TEXT`, verbatim. Use it for free text: a `--set` value is parsed as YAML,
+   which cuts text at ` #`, turns `yes` into a boolean and rejects `Changed: …`.
+2. `--set train.description=TEXT`, verbatim, for simple text.
+3. With `--set` overrides of non-bookkeeping keys, or `--agent`: the preset's description
+   followed by `Changed: <key>=<value>, …`, listing the overrides in the order given, then
+   `agent.name=<name>` for `--agent`. Bookkeeping keys never enter the list, so `--seed`,
+   `--group`, `--name` and a sweep's per-seed values give every seed of a group the same
+   description.
+4. Otherwise the preset's description as it is.
+
+A run with no stored description, such as one trained before descriptions existed, shows the
+description of the preset under `configs/` whose `train.name` equals its own, derived when it
+is read; its files are never rewritten, and with no such preset it shows none. `snakeppo
+compare` and the text format of `snakeppo results` shorten long descriptions with `…`
+(`results.DESCRIPTION_WIDTH`, 48 characters); `results` shows the description of a group's first
+run.
 
 ## Seeding and reproducibility
 
@@ -208,6 +237,7 @@ runs/<YYYY-MM-DD_HHMMSS>_<train.name>_seed<env.seed>/
     run.json        run identity (below)
     config.yaml     the fully resolved config
     metrics.jsonl   one JSON object per update
+    stop-request    only while a stop is pending (see Stopping a run)
     tb/             TensorBoard event files
     checkpoints/
         best.pt     checkpoint with the best eval mean score so far
@@ -215,37 +245,44 @@ runs/<YYYY-MM-DD_HHMMSS>_<train.name>_seed<env.seed>/
                     every eval update and the final update)
 ```
 
-A `_2`, `_3`, ... suffix is added if the folder name already exists.
+A `_2`, `_3`, ... suffix is added if the folder name already exists. Runs started from the
+dashboard also leave a launch record under `runs/.launches/` (see Launch records).
 
 `run.json` fields:
 
 | Field | Meaning |
 | --- | --- |
-| `schema_version` | Run-folder format version, currently `4`. Covers this layout, the metrics keys and the checkpoint contents. |
+| `schema_version` | Run-folder format version, currently `5`. Covers this layout, the metrics keys and the checkpoint contents. |
 | `name` | `train.name`. |
 | `created` | Local timestamp with UTC offset, to the second. |
 | `git_sha` | Commit the run was trained from, or `null` outside a git checkout. |
 | `agent` | `agent.name`. |
 | `param_count` | Number of model parameters. |
 | `device` | Device the run trained on, for example `cuda` or `cpu`. |
-| `status` | `running` while training, then `finished`, `interrupted` (Ctrl+C) or `failed` (any other error). Readers also report `stalled` (below) and, for schema-1 runs, `unknown`. |
+| `status` | `running` while training, then `finished`, `interrupted` (Ctrl+C or a stop request) or `failed` (any other error). Readers also report `stalled` (below) and, for schema-1 runs, `unknown`. |
 | `total_updates` | Number of PPO updates the run loops to. |
 | `group` | `train.group`: the seed group, or `null`. |
 | `observation` | The observation record: `channels` (the channel names in order, for example `["body", "head", "food", "wall"]`), `size` (the spatial side the network sees) and `view` (`full` or `local`). Schema 4 on. |
+| `process` | The training process while it trains: `pid`, `started` (its creation time from `psutil`, in seconds since the epoch, so a recycled pid never counts as the trainer) and `host` (the machine's name). `null` once training ends, in any outcome. Schema 5 on. |
+| `launch` | The id of the dashboard launch that started the run (its folder under `runs/.launches/`), or `null` for a run started in a terminal. Schema 5 on. |
 | `resumed` | One local timestamp per resume, oldest first. |
 
 `run.json` and the checkpoints are written atomically (a temporary file, then a rename), and
 each update's metrics line is written before its checkpoint, so every checkpoint's update has
 its line in `metrics.jsonl`.
 
-A run whose stored `status` is `running` is reported as `stalled` once nothing has been
-written to `metrics.jsonl` for longer than the stall window, `max(60 s, 5 × median update gap
-of the last 10 updates)`. That usually means the training process is gone.
+A run whose stored `status` is `running` is *alive* while its `process` record names a live
+process on this machine with the same pid and creation time. Once that process is gone the run
+is reported as `stalled` at once. A run whose process cannot be checked (no `process` record,
+as before schema 5, or one from another `host`) falls back to the metrics clock: it is
+reported as `stalled` once nothing has been written to `metrics.jsonl` for longer than the stall
+window, `max(60 s, 5 × median update gap of the last 10 updates)`.
 
 Schema-1 folders stay readable. They store no status: it is inferred as `finished` when the
 last update equals the run's total, otherwise `unknown`. They have no group. Folders before
-schema 4 record no observation: they trained on the default one. Schema-2, schema-3 and
-schema-4 runs are resumable.
+schema 4 record no observation: they trained on the default one. Folders before schema 5 have
+no `process` or `launch` key, which readers treat as `null`. Schema-2 to schema-5 runs are
+resumable.
 
 ### `metrics.jsonl`
 
@@ -302,7 +339,7 @@ Eval updates are every `train.eval_interval`-th update and the final update.
 | `update` | Update number at save time. |
 | `env_steps` | Environment steps at save time. |
 | `config` | The full config as a dict, enough to rebuild the model. |
-| `schema_version` | Checkpoint format version (`4`). |
+| `schema_version` | Checkpoint format version (`5`; schema 5 added no checkpoint key). |
 | `best_eval` | Best eval mean score so far. |
 | `wall_time` | Seconds of training at save time, including time before a resume. |
 | `rng` | Random state: `python`, `numpy`, `torch` (CPU) and `cuda` (`null` off CUDA). |
@@ -317,8 +354,9 @@ checkpoint before schema 4 has no record and loads with the default observation,
 trained on.
 
 `uv run snakeppo eval <run folder or .pt file>` evaluates a checkpoint (`--checkpoint best`
-or `last`, default `best`); `--render` watches it play. The result line names the board it
-played on: `Evaluated <checkpoint> on a 16x16 board over 64 episodes (greedy): ...`.
+or `last`, default `best`); `--render` watches it play in the browser instead (see Watching a
+run play). The result line names the board it played on:
+`Evaluated <checkpoint> on a 16x16 board over 64 episodes (greedy): ...`.
 
 ### Evaluating on another board size
 
@@ -335,6 +373,28 @@ training metric. How well a model plays another size is a measured result, never
 curriculum run trains on walled arenas inside the full-size tensor, so it never sees a smaller
 tensor either.
 
+### Watching a run play
+
+```sh
+uv run snakeppo eval runs/<run> --render [--checkpoint best|last] [--stochastic] [--board-size N] [--envs 1-4] [--sleep S] [--port 8765]
+```
+
+This opens the dashboard's Replay tab with `--envs` boards (1 to 4) of the run, each playing
+the checkpoint greedily or, with `--stochastic`, by sampling; `--board-size` is checked as above.
+`--sleep S` picks the starting speed: the Replay speed nearest to `1 / S` steps per second, or
+Max for 0. Replay plays runs from the folder the dashboard serves, so the command serves the
+run folder's parent:
+
+- a dashboard on `--port` (default 8765) already serves that folder: it opens the browser there
+  and exits;
+- nothing answers on the port: it starts the dashboard there and runs it in the foreground until
+  Ctrl+C;
+- a dashboard there serves another folder: it starts one on a free port instead.
+
+Replay plays until it is closed, so `--episodes` with `--render` is refused. A `.pt` file that is
+not a run's `checkpoints/best.pt` or `checkpoints/last.pt` is refused too: score it with
+headless `eval`.
+
 ## Resuming a run
 
 ```sh
@@ -342,29 +402,60 @@ uv run snakeppo train --resume runs/<run>
 ```
 
 This continues the run in place from `checkpoints/last.pt`. It drops the `metrics.jsonl` lines
-logged after that checkpoint, purges the stale TensorBoard events and adds a timestamp to
-`resumed`. It takes no other option. It resumes schema-2, schema-3 and schema-4 runs; a
-schema-2 or schema-3 run continues as schema 4, and its `run.json` then says `4` and gains the
-`observation` record (the default observation, the one it trained on). A recurrent run
-continues from its checkpoint's `policy_state`. It refuses a finished run, a schema-1 run, a
-run of a newer schema, a run with no `last.pt`, a recurrent checkpoint without
-`policy_state`, a run trained on a different device type, and a run still `running` within
-the stall window. The continuation is exact on CPU, and on GPU with `train.deterministic: true`.
+logged after that checkpoint, purges the stale TensorBoard events, removes a leftover
+`stop-request`, records its own `process` and adds a timestamp to `resumed`. It takes no other
+option. It resumes schema-2 to schema-5 runs; an older run continues as schema 5, so its
+`run.json` then says `5`, and a schema-2 or schema-3 run also gains the `observation` record
+(the default observation, the one it trained on). A recurrent run continues from its
+checkpoint's `policy_state`. It refuses a finished run, a schema-1 run, a run of a newer
+schema, a run with no `last.pt`, a recurrent checkpoint without `policy_state`, a run trained
+on a different device type, and a run still `running` whose process is alive (the message names
+its pid) or, when its process cannot be checked, that is still within the stall window. A
+`stalled` run whose process is gone resumes at once. The continuation is exact on CPU, and on
+GPU with `train.deterministic: true`.
+
+## Stopping a run
+
+A run stops cleanly once a `stop-request` file (`{"requested": <seconds since the epoch>}`)
+appears in its folder; the dashboard's **Stop** writes it, for runs started in a terminal too.
+The trainer checks for it at the end of every PPO update. It then saves `checkpoints/last.pt`
+for that update, unless the update already saved it, and ends exactly as Ctrl+C does: the status
+is `interrupted`, `process` is `null`, the resume hint is printed and the exit code is 130. A
+stop that arrives during the last update lets the run finish instead. The file is removed when
+the run ends and before a resume starts, so a stopped run continues with
+`snakeppo train --resume` like any interrupted one, exactly as above.
+
+If the process is still alive 60 s after a dashboard stop (`STOP_GRACE_SECONDS` in
+`src/snakeppo/dashboard/launches.py`), the dashboard terminates its whole process tree, waits
+5 s and kills what is left. A run ended that way keeps `status: running` with a dead process,
+so it shows as `stalled` and resumes from its last checkpoint.
 
 ## Seed sweeps
 
 ```sh
-uv run snakeppo sweep --seeds 1,2,3 --config configs/baseline.yaml [--set …] [--jobs 2]
+uv run snakeppo sweep --seeds 1,2,3 --config configs/baseline.yaml [--set …] [--jobs 2] [--group GROUP] [--description TEXT]
 ```
 
-This trains one run per seed as one seed group, with the id `<train.name>@<YYYYmmdd-HHMMSS>`.
+This trains one run per seed as one seed group, with the id `<train.name>@<YYYYmmdd-HHMMSS>`
+unless `--group GROUP` names it.
 Before any seed starts, the sweep resolves the config and builds its network once, exactly
 as each child will, so an unknown agent, a bad `agent.kwargs`, an even-board network with the
 local view or a recurrent batching that splits an env fails once, up front. Each seed runs in
 its own `snakeppo train` child process. With `--jobs` above 1 the children's
 output is captured, and a failed seed's last 20 lines (`FAILURE_TAIL_LINES` in `sweep.py`) are
-printed when it ends. The command exits with code 1 if any seed failed. Add a seed to an
+printed when it ends. The command exits with code 1 if any seed it ran failed. Add a seed to an
 existing group by hand with `uv run snakeppo train … --seed 4 --group <id>`.
+
+`--group` also joins an existing group, which is how a stopped sweep continues as the same group
+(the dashboard's **Resume sweep** runs this with the original seeds and options). Seeds the
+group already has are not trained again: finished, failed and still-running seeds are left
+alone and printed as `already in the group`, interrupted and stalled seeds continue with
+`snakeppo train --resume <folder>`, and only missing seeds start from scratch.
+
+A sweep started from the dashboard also watches its launch's `runs/.launches/<id>/stop-request`:
+once it exists the sweep starts no further seeds, prints the ones it never started as
+`skipped` and exits with code 130. Its seeds then run with no console window and write to the
+launch's `output.log`, also with `--jobs 1`.
 
 ## Comparing runs
 
@@ -395,7 +486,7 @@ The protocol is implemented in `src/snakeppo/results.py`:
   uses what it has, and the table's footer says so.
 - **Bookkeeping keys** (`BOOKKEEPING_KEYS`) never count: `env.seed`, `train.name`,
   `train.group`, `train.runs_dir`, `train.device`, `train.deterministic`,
-  `train.checkpoint_interval`.
+  `train.checkpoint_interval`, `train.description`.
 - **Protocol keys** (`PROTOCOL_KEYS`) set the budget and how runs are measured:
   `train.total_env_steps`, `train.eval_interval`, `train.eval_episodes`. They are shown as the
   budget, never as a switch.
@@ -429,23 +520,108 @@ A withheld verdict shows one of these reasons:
 ## Dashboard
 
 ```sh
-uv run snakeppo serve [--runs-dir runs] [--port 8765] [--open]
+uv run snakeppo serve [--runs-dir runs] [--port 8765] [--configs-dir configs] [--open]
 ```
 
-This serves a local dashboard at `http://127.0.0.1:8765`. It binds to 127.0.0.1 only, is
-read-only and never writes to a run folder. It has three tabs:
+This serves the dashboard, snakePPO's main UI, at `http://127.0.0.1:8765`. It binds to
+127.0.0.1 only. It lists the presets under `configs/` of the folder it was started in
+(`--configs-dir` points elsewhere) and starts launched commands in that folder.
+
+Every run has a fixed colour, a stable hash of its folder name, for its dot in the run list and
+its curves in every chart; two runs may share a colour, but a run never changes its own. Each
+run in the list shows its description and the actions its status allows: **Watch** always,
+**Stop** while it runs, **Resume** when it is `interrupted`, `stalled` or `failed`. The tabs:
 
 - **Live** follows a run as it trains, polling about every 2 s, and shows how long ago its
-  metrics were last written. A `running` run that stays quiet past the stall window (see Run
-  folders) shows as `stalled`.
-- **Compare** overlays the curves of the ticked runs and lists their config differences. It
-  warns when the ticked runs differ in `reward.strategy` or `curriculum.grow`: their training
-  curves then measure different things, while the eval score stays comparable.
-- **Results** shows the `snakeppo results` table. When a group has no reference, it explains why
-  and offers the comparable groups to pick from.
+  metrics were last written and the training process's pid while it is alive. While a stop is
+  pending it says `Stopping… waits for the current update`. A `running` run whose process is
+  gone, or that stays quiet past the stall window (see Run folders), shows as `stalled`.
+- **Compare** overlays the curves of the ticked runs and lists their descriptions and config
+  differences. It warns when the ticked runs differ in `reward.strategy` or `curriculum.grow`:
+  their training curves then measure different things, while the eval score stays comparable.
+- **Results** shows the `snakeppo results` table with each group's description. When a group has
+  no reference, it explains why and offers the comparable groups to pick from.
+- **Launch** starts a single run or a seed sweep from a preset (grouped by folder, with its
+  description), with optional overrides (one `section.key=value` per line), the seeds and seeds
+  trained at once for a sweep, and a description prefilled with the preset's text plus
+  `Changed: …` for the overrides, which you may rewrite. Its launches table shows each launch's
+  state (`running`, `stopping`, `finished`, `stopped` or `failed`), offers **Stop sweep** and
+  **Resume sweep**, and shows the tail of the launch's log with the path of the full
+  `output.log`.
+- **Replay** plays up to four boards side by side, live on the server. Each board picks a run,
+  its `best` or `last` checkpoint, greedy or stochastic play and, for a run that plays any board
+  size (see Evaluating on another board size), the board size. Pause, Step, Restart and the
+  speed (2, 5, 10, 25 or 60 steps per second, or Max) act on every board. Each board shows the
+  score, length, steps since the last apple, how the last game ended and the mean score over
+  its finished games. **Watch** on a run opens Replay with it on the first board.
 
 The **Evaluation** card shows steps per apple and how the eval games ended; the **Curriculum**
 card shows the stage when a run has one.
+
+Replay runs on the CPU with one torch thread, so it never takes the GPU or the cores from a
+training run, and one replay session runs at a time: starting another ends the first. A session
+with no page watching it for 30 s closes. Replay is live only; nothing is recorded.
+
+Every POST must come from the dashboard's own page: it needs `Content-Type: application/json`
+and an `Origin` (or, without one, a `Referer`) of `http://127.0.0.1:<port>` or
+`http://localhost:<port>`, or it gets 403. The routes are listed in
+[architecture.md](architecture.md#dashboard-routes).
+
+### Launching from the dashboard
+
+A launch runs exactly the command a terminal would, as an argument list, detached so it
+outlives the server:
+
+```text
+<python> -m snakeppo.cli train --config <preset> [--set KEY=VALUE …] [--description TEXT]
+<python> -m snakeppo.cli sweep --seeds 1,2,3 --config <preset> [--set KEY=VALUE …] --jobs N --group GROUP [--description TEXT]
+<python> -m snakeppo.cli train --resume <run folder>
+```
+
+`<python>` is the interpreter running the dashboard. Before anything starts, the dashboard loads
+the preset with the overrides and builds the network, as `snakeppo sweep` does, and shows the
+error on the page when that fails. When the preset's `train.runs_dir`, resolved from the
+dashboard's folder, is not the folder it serves, the launch adds
+`--set train.runs_dir=<served folder>` (a bookkeeping key), so the run lands where the dashboard
+looks. The Launch tab sends its description as `--description`; an empty description box sends
+no `--description`, and the CLI then derives the text from the preset and the overrides.
+**Resume sweep** runs the `sweep` command again with the original seeds, options and `--group`
+(see Seed sweeps). Progress bars are off when the output is not a terminal, so `output.log`
+holds plain lines.
+
+### Launch records
+
+Each launch keeps a record in the runs folder, which `find_runs` never lists as a run (it holds
+no `run.json`):
+
+```text
+runs/.launches/<YYYYmmdd-HHMMSS>-<6 hex digits>/
+    launch.json     the launch (below)
+    output.log      the launched command's stdout and stderr
+    stop-request    a sweep's pending stop
+```
+
+The command gets `SNAKEPPO_LAUNCH_ID=<launch id>` and `PYTHONUNBUFFERED=1` in its environment;
+the trainer stores the id in `run.json` as `launch`, which links a train launch to its run
+folder. `launch.json` is written atomically, with these fields:
+
+| Field | Meaning |
+| --- | --- |
+| `id` | The launch id, the folder's name. |
+| `kind` | `train`, `sweep` or `resume`. |
+| `argv` | The exact command it started. |
+| `process` | The started process's record (`pid`, `started`, `host`), as in `run.json`. |
+| `created` | Local timestamp with UTC offset, to the second. |
+| `preset` | The preset's path relative to the configs folder. |
+| `overrides` | The `section.key=value` overrides, in order. |
+| `description` | The description it passed with `--description`. |
+| `seeds`, `jobs`, `group` | A sweep's seeds, seeds trained at once and seed group; `group` is also the run's group for a `resume` launch and the preset's `train.group` for a `train` launch. |
+| `run` | The id of the run a `resume` launch continues. |
+| `resumes` | The id of the sweep launch a **Resume sweep** continues. |
+
+A field that does not apply to the launch's kind is `null` or empty. Everything the dashboard
+shows about launches is derived from these files and the run folders, so a restarted dashboard
+still lists, stops and resumes what an earlier one started.
 
 TensorBoard still works, with env steps on the x-axis:
 
