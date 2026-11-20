@@ -75,6 +75,7 @@
 
 .replay-board {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 0.6rem;
   min-width: 0;
   padding: 0.75rem;
@@ -103,6 +104,7 @@
   flex: 1;
   width: auto;
   min-width: 0;
+  max-width: 100%;
 }
 
 .replay-remove {
@@ -113,10 +115,14 @@
   display: inline-flex;
   align-items: center;
   gap: 0.4rem;
+  min-width: 0;
+  max-width: 100%;
 }
 
 .replay-size {
   width: auto;
+  min-width: 0;
+  max-width: 100%;
 }
 
 .replay-note {
