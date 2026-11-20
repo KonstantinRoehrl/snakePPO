@@ -8,6 +8,8 @@ from the rollout's start state instead of shuffling single steps.
 from __future__ import annotations
 
 import math
+import os
+import sys
 import time
 from collections.abc import Iterator
 from dataclasses import dataclass
@@ -48,6 +50,13 @@ from snakeppo.ppo.functional import (
     explained_variance,
     lr_at,
     ppo_loss,
+)
+from snakeppo.processes import (
+    LAUNCH_ENV,
+    clear_stop_request,
+    is_alive,
+    process_record,
+    stop_requested,
 )
 from snakeppo.runs import (
     CHECKPOINT_DIR,
@@ -126,6 +135,8 @@ def train(config: Config, *, progress: bool = True) -> Path:
         total_updates=total_updates(config),
         group=config.train.group,
         observation=observation_record(config),
+        process=process_record(),
+        launch=os.environ.get(LAUNCH_ENV) or None,
     )
     print(f"Training '{config.agent.name}' on {device}; writing run folder {run_dir}")
     obs = env.reset()
@@ -162,6 +173,10 @@ class ResumeError(ValueError):
     """A run folder that cannot be continued exactly; the message says why."""
 
 
+class StopRequested(KeyboardInterrupt):
+    """A stop request reached the trainer at an update boundary."""
+
+
 def _check_resumable(schema: int | None, what: Path) -> None:
     if schema in RESUMABLE_SCHEMAS:
         return
@@ -176,9 +191,9 @@ def resume(run_dir: str | Path, *, progress: bool = True) -> Path:
     """Continue an interrupted, failed or stalled run in place from ``checkpoints/last.pt``.
 
     The continuation is exact on CPU: the same metrics an uninterrupted run would have logged,
-    apart from ``wall_time`` and ``train/fps``. A schema-2 or 3 run continues as schema 4: its
-    config has no observation section and its checkpoints no observation record, so it loads
-    with the default observation, which is the one it trained on.
+    apart from ``wall_time`` and ``train/fps``. A run of an older schema continues as schema 5; a
+    schema-2 or 3 run's config has no observation section and its checkpoints no observation
+    record, so it loads with the default observation, which is the one it trained on.
     """
     run_dir = Path(run_dir)
     if not (run_dir / RUN_INFO_FILE).is_file():
@@ -188,6 +203,12 @@ def resume(run_dir: str | Path, *, progress: bool = True) -> Path:
     if record.status == "finished":
         raise ResumeError(f"{run_dir} already finished all {record.total_updates} updates")
     if record.status == "running":
+        process = record.info.get("process")
+        if is_alive(process):
+            raise ResumeError(
+                f"{run_dir} is still being trained by process {process['pid']}; "
+                "stop it before resuming"
+            )
         age = time.time() - last_write_time(run_dir)
         raise ResumeError(
             f"{run_dir} is still being trained: its metrics were written {age:.0f} s ago. If no "
@@ -235,12 +256,14 @@ def resume(run_dir: str | Path, *, progress: bool = True) -> Path:
     update, env_steps = checkpoint["update"], checkpoint["env_steps"]
     dropped = truncate_metrics(run_dir, after_update=update)
     stamp = datetime.now().astimezone().isoformat(timespec="seconds")
+    clear_stop_request(run_dir)  # left by a stop that never reached a trainer
     update_run_info(
         run_dir,
         status="running",
         resumed=[*record.info["resumed"], stamp],
         schema_version=SCHEMA_VERSION,
         observation=observation_record(config),
+        process=process_record(),
     )
     print(
         f"Resuming {run_dir} after update {update} of {record.total_updates} on {device} "
@@ -278,19 +301,23 @@ def _run(
 ) -> Path:
     """Loop from ``start.update + 1`` to the last update, recording the outcome in run.json.
 
-    ``hidden`` is a recurrent model's state for ``obs`` (N, K, H); ``None`` for feed-forward.
+    Every outcome clears the run's process record and any stop request. ``hidden`` is a recurrent
+    model's state for ``obs`` (N, K, H); ``None`` for feed-forward.
     """
     run_dir = session.run_dir
     try:
         best_eval = _loop(session, obs, hidden, start, progress=progress, purge_step=purge_step)
-    except KeyboardInterrupt:
-        update_run_info(run_dir, status="interrupted")
+    except KeyboardInterrupt:  # Ctrl+C or StopRequested
+        update_run_info(run_dir, status="interrupted", process=None)
         print(f"Interrupted. Continue with: snakeppo train --resume {run_dir}")
         raise
     except Exception:
-        update_run_info(run_dir, status="failed")
+        update_run_info(run_dir, status="failed", process=None)
         raise
-    update_run_info(run_dir, status="finished")
+    else:
+        update_run_info(run_dir, status="finished", process=None)
+    finally:
+        clear_stop_request(run_dir)
     print(f"Finished training: best eval score {best_eval:.2f}. Run folder: {run_dir}")
     return run_dir
 
@@ -326,7 +353,7 @@ def _loop(
             unit="update",
             initial=start.update,
             total=num_updates,
-            disable=not progress,
+            disable=not progress or not sys.stderr.isatty(),
         )
         for update in bar:
             # the first update runs at the start value, the last one exactly at the end value
@@ -504,7 +531,9 @@ def _loop(
                 bar.set_postfix(eval_score=f"{stats.score_mean:.2f}", best=f"{best_eval:.2f}")
             # the metrics line goes first, so every checkpoint's update has its line
             logger.log(update, env_steps, metrics)
-            if is_eval or update % config.train.checkpoint_interval == 0:
+            # a stop at the last update is moot: the run finishes instead
+            stopping = update < num_updates and stop_requested(run_dir)
+            if stopping or is_eval or update % config.train.checkpoint_interval == 0:
                 state = {
                     "model": model,
                     "optimizer": optimizer,
@@ -524,6 +553,8 @@ def _loop(
                 save_checkpoint(checkpoints / "last.pt", **state)
                 if improved:
                     save_checkpoint(checkpoints / "best.pt", **state)
+            if stopping:  # last.pt now holds this update, so no finished update is lost
+                raise StopRequested
     return best_eval
 
 
