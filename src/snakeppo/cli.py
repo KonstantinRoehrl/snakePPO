@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 import time
 from collections.abc import Sequence
@@ -94,6 +95,11 @@ def _parser() -> argparse.ArgumentParser:
     )
     _experiment_options(sweep)
     sweep.add_argument("--jobs", type=int, default=1, help="seeds trained at once (default 1)")
+    sweep.add_argument(
+        "--group",
+        help="seed group to join or name (default: NAME@START-TIME); "
+        "seeds already in it are resumed or left alone",
+    )
 
     results = commands.add_parser(
         "results", help="judge seed groups against their baseline group across seeds"
@@ -357,6 +363,7 @@ def _run_description(run_dir: Path, presets: Sequence[Preset]) -> str:
 
 
 def _sweep(args: argparse.Namespace) -> int:
+    from snakeppo.processes import LAUNCH_ENV, STOP_REQUEST_FILE, launch_dir
     from snakeppo.sweep import format_outcomes, group_id, run_sweep
 
     # resolve the config and build its network exactly as each child will, so a bad option
@@ -372,18 +379,26 @@ def _sweep(args: argparse.Namespace) -> int:
     if args.description is not None:
         # one token, so a text that starts with "-" is not read as an option
         train_args.append(f"--description={args.description}")
-    group = group_id(config.train.name)
+    group = args.group or group_id(config.train.name)
     seeds = ", ".join(map(str, args.seeds))
     print(f"Sweep {group}: seeds {seeds}, {args.jobs} at a time")
+    runs_dir = Path(config.train.runs_dir)
+    # a sweep the dashboard launched is stopped through a file in its launch folder
+    launch = os.environ.get(LAUNCH_ENV) or None
+    stop_file = launch_dir(runs_dir, launch) / STOP_REQUEST_FILE if launch else None
     outcomes = run_sweep(
         args.seeds,
         train_args,
-        runs_dir=Path(config.train.runs_dir),
+        runs_dir=runs_dir,
         group=group,
         jobs=args.jobs,
+        stop_file=stop_file,
+        detached=launch is not None,
     )
     print(format_outcomes(group, outcomes))
-    return 0 if all(outcome.returncode == 0 for outcome in outcomes) else 1
+    if stop_file is not None and stop_file.exists():
+        return 130
+    return 0 if all(outcome.returncode in (0, None) for outcome in outcomes) else 1
 
 
 def _results(args: argparse.Namespace) -> int:

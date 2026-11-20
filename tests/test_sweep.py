@@ -1,4 +1,7 @@
+import os
+import subprocess
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -6,7 +9,8 @@ import pytest
 
 from snakeppo import sweep
 from snakeppo.cli import main
-from snakeppo.runs import find_runs, load_run
+from snakeppo.processes import LAUNCH_ENV, STOP_REQUEST_FILE, child_creationflags, launch_dir
+from snakeppo.runs import METRICS_FILE, find_runs, load_run, update_run_info
 
 SMOKE = Path(__file__).resolve().parents[1] / "configs" / "smoke.yaml"
 
@@ -75,3 +79,105 @@ def test_bad_sweep_options_fail_before_any_training(tmp_path, capsys, extra, mes
     assert main(_args(tmp_path, *extra)) == 2
     assert message in capsys.readouterr().err
     assert list(tmp_path.iterdir()) == []
+
+
+def test_resume_command_continues_the_folder_through_this_interpreter(tmp_path):
+    run_dir = tmp_path / "a-run"
+    assert sweep.resume_command(run_dir) == [
+        sys.executable,
+        "-m",
+        "snakeppo.cli",
+        "train",
+        "--resume",
+        str(run_dir),
+    ]
+
+
+def test_joining_a_group_continues_only_its_unfinished_seeds(tmp_path, monkeypatch, capsys):
+    assert main(_args(tmp_path, "--seeds", "1,2,3", "--jobs", "3", "--group", "g@1")) == 0
+    records = [load_run(run) for run in find_runs([tmp_path])]
+    assert {r.group for r in records} == {"g@1"}
+    folders = {r.seed: r.path for r in records}
+    update_run_info(folders[2], status="interrupted")
+    update_run_info(folders[3], status="running")
+    an_hour_ago = time.time() - 3600
+    os.utime(folders[3] / METRICS_FILE, (an_hour_ago, an_hour_ago))
+    assert load_run(folders[3]).status == "stalled"
+    capsys.readouterr()
+
+    started = []
+    finishes_at_once = [sys.executable, "-c", "pass"]
+
+    def resume_command(run_dir):
+        started.append(("resume", run_dir))
+        return finishes_at_once
+
+    def child_command(seed, group, train_args):
+        started.append(("train", seed, group))
+        return finishes_at_once
+
+    monkeypatch.setattr(sweep, "resume_command", resume_command)
+    monkeypatch.setattr(sweep, "child_command", child_command)
+    assert main(_args(tmp_path, "--seeds", "1,2,3,4", "--group", "g@1")) == 0
+    assert started == [("resume", folders[2]), ("resume", folders[3]), ("train", 4, "g@1")]
+    out = capsys.readouterr().out
+    assert "Sweep g@1: 1 of 4 seeds trained successfully." in out
+    assert f"  seed 1: finished, already in the group  {folders[1]}" in out
+    assert f"  seed 2: interrupted  {folders[2]}" in out
+    assert "  seed 4: no run folder  -" in out
+
+
+def test_a_stop_request_starts_no_further_seeds(tmp_path):
+    stop_file = tmp_path / STOP_REQUEST_FILE
+
+    def requests_a_stop(seed, group, train_args):
+        return [sys.executable, "-c", f"open({str(stop_file)!r}, 'w').close()"]
+
+    outcomes = sweep.run_sweep(
+        [1, 2, 3], [], runs_dir=tmp_path, group="g@1", command=requests_a_stop, stop_file=stop_file
+    )
+    assert outcomes == [
+        sweep.SeedOutcome(1, 0, None, "no run folder"),
+        sweep.SeedOutcome(2, None, None, "skipped"),
+        sweep.SeedOutcome(3, None, None, "skipped"),
+    ]
+    assert sweep.format_outcomes("g@1", outcomes).splitlines() == [
+        "Sweep g@1: 0 of 3 seeds trained successfully.",
+        "  seed 1: no run folder  -",
+        "  seed 2: skipped  -",
+        "  seed 3: skipped  -",
+    ]
+
+
+def test_a_launched_sweep_with_a_stop_request_exits_130(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv(LAUNCH_ENV, "launch-1")
+    stop_file = launch_dir(tmp_path, "launch-1") / STOP_REQUEST_FILE
+    stop_file.parent.mkdir(parents=True)
+    stop_file.write_text("{}", encoding="utf-8")
+    assert main(_args(tmp_path, "--seeds", "1,2")) == 130
+    out = capsys.readouterr().out
+    assert "  seed 1: skipped  -" in out and "  seed 2: skipped  -" in out
+    assert find_runs([tmp_path]) == []
+
+
+class _FinishedProcess:
+    returncode = 0
+
+    def poll(self):
+        return self.returncode
+
+
+@pytest.mark.parametrize("jobs", [1, 2])
+def test_a_detached_sweep_starts_seeds_without_a_console_into_its_own_output(
+    tmp_path, monkeypatch, jobs
+):
+    started = []
+
+    def popen(argv, **kwargs):
+        started.append(kwargs)
+        return _FinishedProcess()
+
+    monkeypatch.setattr(sweep.subprocess, "Popen", popen)
+    sweep.run_sweep([1, 2], [], runs_dir=tmp_path, group="g@1", jobs=jobs, detached=True)
+    detached = {"stdout": sys.stdout, "stderr": subprocess.STDOUT}
+    assert started == [detached | {"creationflags": child_creationflags()}] * 2
