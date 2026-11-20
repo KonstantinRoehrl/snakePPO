@@ -295,4 +295,16 @@
   .launch-log pre {
     max-width: 80vw;
   }
+
+  /* `anywhere` lets the table shrink the What column to one letter; break at spaces instead and
+     keep the column readable, so the table scrolls sideways inside its wrapper rather than the
+     text breaking per letter. */
+  .launch-what,
+  .launch-detail {
+    overflow-wrap: break-word;
+  }
+
+  .launch-launches .table td:nth-child(2) {
+    min-width: 12rem;
+  }
 }
