@@ -1,6 +1,8 @@
 // Chart specification and Plotly rendering. Plotly is the global the classic script
 // /vendor/plotly.min.js defines; colours come from the CSS tokens in style.css.
 
+import { RUN_PALETTE_SIZE } from "./colors.js";
+
 export const X_MODES = [
   { id: "update", label: "Update", title: "update" },
   { id: "env_steps", label: "Env steps", title: "env steps" },
@@ -63,9 +65,8 @@ const PLOT_CONFIG = {
   responsive: true,
   modeBarButtonsToRemove: ["lasso2d", "select2d", "autoScale2d"],
 };
-const SERIES_TOKENS = 8;
 
-/** Chart colours read from the CSS custom properties; call again after a theme change. */
+/** Chart and run colours read from the CSS custom properties; call again after a theme change. */
 export function readTheme(element = document.documentElement) {
   const style = getComputedStyle(element);
   const token = (name) => style.getPropertyValue(name).trim();
@@ -80,12 +81,8 @@ export function readTheme(element = document.documentElement) {
     hover: token("--surface"),
     hoverBorder: token("--line-strong"),
     fontFamily: token("--font"),
-    series: Array.from({ length: SERIES_TOKENS }, (_, i) => token(`--series-${i + 1}`)),
+    runColors: Array.from({ length: RUN_PALETTE_SIZE }, (_, i) => token(`--run-${i + 1}`)),
   };
-}
-
-export function seriesColor(theme, index) {
-  return theme.series[index % theme.series.length];
 }
 
 function translucent(color, alpha) {

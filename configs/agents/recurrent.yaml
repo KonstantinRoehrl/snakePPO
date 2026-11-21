@@ -5,3 +5,6 @@ agent:
   name: recurrent
 train:
   name: agent-recurrent
+  description: >-
+    Gives the network a memory (a GRU) that carries what it saw in earlier steps, which may help
+    it plan routes around its own tail.

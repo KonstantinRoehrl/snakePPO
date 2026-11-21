@@ -5,3 +5,6 @@ reward:
   strategy: hunger
 train:
   name: reward-hunger
+  description: >-
+    Adds a small penalty that grows the longer the snake goes without an apple, plus a bigger
+    one when it starves, to push it to stop circling and go eat.

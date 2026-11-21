@@ -1,0 +1,316 @@
+/* The Launch tab (launch.js): preset picker and start form side by side, the launches table
+   below. Colours come from the tokens in style.css only, so both themes follow. */
+
+.launch-layout {
+  display: grid;
+  grid-template-columns: minmax(16rem, 1fr) minmax(0, 1.35fr);
+  gap: 1rem;
+  align-items: start;
+}
+
+.launch-layout > .card {
+  min-width: 0;
+}
+
+/* ------------------------------------------------------------------ preset picker */
+.launch-preset-list {
+  max-height: 34rem;
+  overflow-y: auto;
+  margin: 0 -0.35rem 0.25rem;
+  padding: 0 0.35rem;
+}
+
+.launch-preset-groups {
+  margin: 0;
+  padding: 0;
+  border: 0;
+  min-width: 0;
+}
+
+.launch-preset-group + .launch-preset-group {
+  margin-top: 0.85rem;
+}
+
+.launch-preset-group h4 {
+  margin-bottom: 0.35rem;
+  color: var(--ink-2);
+  font-size: var(--text-xs);
+  font-weight: 650;
+}
+
+.launch-preset {
+  position: relative;
+  display: grid;
+  gap: 0.1rem;
+  margin-bottom: 0.35rem;
+  padding: 0.45rem 0.6rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  cursor: pointer;
+  transition:
+    background-color var(--speed) var(--ease-out),
+    border-color var(--speed) var(--ease-out);
+}
+
+.launch-preset:hover {
+  background: var(--surface-3);
+}
+
+.launch-preset input {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  margin: 0;
+  cursor: pointer;
+}
+
+.launch-preset:has(input:checked) {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+
+.launch-preset:has(input:focus-visible) {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+.launch-preset-name {
+  font-size: var(--text-sm);
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.launch-preset-path {
+  color: var(--ink-2);
+  font-size: var(--text-xs);
+  overflow-wrap: anywhere;
+}
+
+.launch-preset-description {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  line-clamp: 3;
+  margin-top: 0.15rem;
+  color: var(--ink);
+  font-size: var(--text-sm);
+}
+
+/* ------------------------------------------------------------------ start form */
+.launch-form {
+  display: grid;
+  gap: 0.85rem;
+  padding-bottom: 0.35rem;
+}
+
+.launch-form .card-head {
+  margin-bottom: 0;
+}
+
+.launch-form .card-head h3 {
+  overflow-wrap: anywhere;
+}
+
+.launch-kind {
+  display: grid;
+  gap: 0.25rem;
+  justify-items: start;
+}
+
+.launch-sweep-fields {
+  display: grid;
+  grid-template-columns: minmax(0, 2fr) minmax(0, 1fr);
+  gap: 0.75rem;
+}
+
+.launch-field-hint {
+  color: var(--ink-2);
+  font-size: var(--text-xs);
+}
+
+/* Textareas do not inherit the page font the way inputs do (style.css covers button, input, select). */
+.launch-textarea {
+  min-height: 4.5rem;
+  font-family: inherit;
+  color: inherit;
+  resize: vertical;
+  line-height: 1.45;
+}
+
+.launch-overrides {
+  font-family: ui-monospace, "Cascadia Mono", "Segoe UI Mono", Consolas, monospace;
+}
+
+.launch-description {
+  display: grid;
+  gap: 0.25rem;
+  justify-items: start;
+}
+
+.launch-description .field {
+  width: 100%;
+}
+
+.launch-submit {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem 0.85rem;
+}
+
+.launch-start {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: var(--accent-ink);
+}
+
+.launch-start:hover {
+  border-color: var(--accent-hover);
+  background: var(--accent-hover);
+}
+
+.launch-form .inline-error {
+  margin-top: 0;
+  max-width: 75ch;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.launch-notice {
+  max-width: 75ch;
+  color: var(--ink-2);
+  font-size: var(--text-sm);
+}
+
+/* ------------------------------------------------------------------ launches table */
+.launch-launches {
+  margin-top: 0.25rem;
+}
+
+.launch-launches .inline-error {
+  margin: 0 0 0.6rem;
+}
+
+/* The visually-hidden header labels are absolutely positioned; without a containing block here they
+   land in the page and widen its scrollable area instead of being clipped by the wrapper. */
+.launch-launches .table-wrap {
+  position: relative;
+}
+
+.launch-dot-cell {
+  width: 1.5rem;
+}
+
+.launch-dot {
+  display: inline-block;
+  width: 0.65rem;
+  height: 0.65rem;
+  margin-top: 0.3rem;
+  border-radius: 50%;
+  background: var(--dot);
+}
+
+/* No run folder yet: nothing has a colour to show. */
+.launch-dot.is-empty {
+  border: 1px dashed var(--line-strong);
+  background: transparent;
+}
+
+.launch-what {
+  display: block;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.launch-detail {
+  display: block;
+  color: var(--ink-2);
+  font-size: var(--text-xs);
+  overflow-wrap: anywhere;
+}
+
+.launch-actions {
+  min-width: 9rem;
+}
+
+.launch-actions > * + * {
+  margin-top: 0.35rem;
+}
+
+.launch-stop {
+  border-color: color-mix(in srgb, var(--bad) 45%, var(--line-strong));
+  color: var(--bad);
+}
+
+.launch-stop:hover {
+  background: color-mix(in srgb, var(--bad) 9%, var(--surface));
+}
+
+.launch-log summary {
+  color: var(--accent);
+  font-size: var(--text-sm);
+  font-weight: 550;
+  cursor: pointer;
+}
+
+.launch-log pre {
+  max-width: min(60ch, 70vw);
+  max-height: 16rem;
+  overflow: auto;
+  margin: 0.35rem 0;
+  padding: 0.5rem 0.6rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface-2);
+  font-family: ui-monospace, "Cascadia Mono", "Segoe UI Mono", Consolas, monospace;
+  font-size: var(--text-xs);
+  white-space: pre;
+}
+
+.launch-log p {
+  font-size: var(--text-xs);
+}
+
+.launch-skeleton {
+  max-width: 100%;
+  margin-bottom: 0.5rem;
+}
+
+.launch-empty {
+  margin: 0.5rem 0 0.75rem;
+}
+
+/* ------------------------------------------------------------------ medium and narrow screens */
+@media (max-width: 1100px) {
+  .launch-layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .launch-preset-list {
+    max-height: 22rem;
+  }
+}
+
+@media (max-width: 760px) {
+  .launch-sweep-fields {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .launch-log pre {
+    max-width: 80vw;
+  }
+
+  /* `anywhere` lets the table shrink the What column to one letter; break at spaces instead and
+     keep the column readable, so the table scrolls sideways inside its wrapper rather than the
+     text breaking per letter. */
+  .launch-what,
+  .launch-detail {
+    overflow-wrap: break-word;
+  }
+
+  .launch-launches .table td:nth-child(2) {
+    min-width: 12rem;
+  }
+}

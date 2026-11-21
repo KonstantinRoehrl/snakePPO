@@ -5,3 +5,6 @@ curriculum:
   grow: length
 train:
   name: curriculum-length
+  description: >-
+    Starts with short games that count as won once the snake is 4, then 8, 16 and 32 cells long,
+    before the full game, so it masters a short snake before a long one.

@@ -5,3 +5,6 @@ agent:
   name: attention
 train:
   name: agent-attention
+  description: >-
+    Swaps the network for a small transformer that weighs every cell against every other, which
+    may help it see how its own body blocks the way to the apple.

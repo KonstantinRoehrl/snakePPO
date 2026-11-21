@@ -1,10 +1,16 @@
+import shutil
+import threading
+import webbrowser
 from pathlib import Path
 
 import pytest
 import torch
 
-from snakeppo.agents import PolicyPlayer, available_agents
-from snakeppo.cli import main
+from snakeppo.agents import available_agents
+from snakeppo.cli import main, speed_for_sleep
+from snakeppo.config import load_config
+from snakeppo.dashboard import server
+from snakeppo.results import truncate
 from snakeppo.runs import load_checkpoint
 
 SMOKE = Path(__file__).resolve().parents[1] / "configs" / "smoke.yaml"
@@ -74,7 +80,10 @@ def test_train_eval_compare_round_trip(tmp_path, capsys):
     assert "(stochastic)" in capsys.readouterr().out
 
     assert main(["compare", str(tmp_path)]) == 0
-    assert run_dir.name in capsys.readouterr().out
+    header, line = capsys.readouterr().out.splitlines()
+    assert header.split()[-1] == "description" and run_dir.name in line
+    # --name does not change the description: it comes from the preset file
+    assert line.rstrip().endswith(truncate(load_config(SMOKE).train.description))
 
 
 def test_config_errors_are_reported_without_a_traceback(tmp_path, capsys):
@@ -109,6 +118,7 @@ def test_results_judges_groups_in_every_format(tmp_path, capsys):
     assert "ppo.target_kl=0.0001" in kl_line and " base " in kl_line
     base_line = next(line for line in text.splitlines() if line.startswith("base "))
     assert base_line.rstrip().endswith("reference")
+    assert truncate(load_config(SMOKE).train.description) in base_line
     assert main(["results", str(tmp_path), "--format", "csv"]) == 0
     assert capsys.readouterr().out.startswith("group,train.total_env_steps")
     assert main(["results", str(tmp_path), "--baseline", "kl", "--format", "markdown"]) == 0
@@ -142,6 +152,20 @@ def test_serve_binds_localhost_opens_the_browser_and_stops_on_ctrl_c(tmp_path, m
     (url,) = opened
     assert url.startswith("http://127.0.0.1:") and url in out
     assert "Stopped the dashboard." in out
+
+
+def test_serve_passes_the_configs_folder_and_says_it_is_the_main_ui(monkeypatch, capsys):
+    from snakeppo.dashboard import server
+
+    calls = []
+    monkeypatch.setattr(server, "serve", lambda *args, **kwargs: calls.append((args, kwargs)) or 0)
+    assert main(["serve", "--runs-dir", "r", "--port", "0", "--configs-dir", "presets"]) == 0
+    assert calls == [((Path("r"), 0), {"open_browser": False, "configs_dir": Path("presets")})]
+    assert main(["serve"]) == 0
+    assert calls[-1][1]["configs_dir"] is None
+    with pytest.raises(SystemExit):
+        main(["--help"])
+    assert "open the local dashboard (main UI)" in capsys.readouterr().out
 
 
 def test_serve_reports_a_busy_port(tmp_path, capsys):
@@ -230,36 +254,159 @@ def test_a_local_view_with_an_even_board_network_fails_before_any_run_folder(tmp
     assert list(tmp_path.iterdir()) == []
 
 
-@pytest.mark.parametrize("board_size", [None, 12])
-def test_eval_render_draws_a_game_until_its_episode_ends(tmp_path, monkeypatch, capsys, board_size):
-    from snakeppo import viewer
+@pytest.fixture(scope="module")
+def render_run(tmp_path_factory):
+    """One smoke run shared by the ``eval --render`` tests, which only read it."""
+    return _smoke_run(tmp_path_factory.mktemp("runs"))
 
-    monkeypatch.setenv("SDL_VIDEODRIVER", "dummy")
-    monkeypatch.setenv("SDL_AUDIODRIVER", "dummy")
-    drawn, ended = set(), []
-    real_draw, real_end_episodes = viewer.Viewer.draw, PolicyPlayer.end_episodes
 
-    def draw(self, grids, scores, body_order):
-        drawn.add((self.board_size, tuple(grids.shape[-2:]), tuple(body_order.shape[-2:])))
-        return real_draw(self, grids, scores, body_order)
+@pytest.fixture
+def opened(monkeypatch):
+    """URLs ``webbrowser.open`` was asked to show; no real browser starts."""
+    urls = []
+    monkeypatch.setattr(webbrowser, "open", urls.append)
+    return urls
 
-    def end_episodes(self, done):
-        ended.append(int(done.sum()))
-        real_end_episodes(self, done)
 
-    run_dir = _smoke_run(tmp_path)
-    capsys.readouterr()
-    # patched after training, whose evals may play through PolicyPlayer too
-    monkeypatch.setattr(viewer.Viewer, "draw", draw)
-    monkeypatch.setattr(PolicyPlayer, "end_episodes", end_episodes)
-    args = ["eval", str(run_dir), "--render", "--episodes", "1", "--envs", "1", "--sleep", "0"]
-    if board_size is not None:
-        args += ["--board-size", str(board_size)]
-    assert main([*args, "--device", "cpu"]) == 0
-    assert "Episode 1 finished with score" in capsys.readouterr().out
-    side = board_size or 8
-    assert drawn == {(side, (side, side), (side, side))}
-    assert sum(ended) == 1
+@pytest.fixture
+def dashboard_on(tmp_path):
+    """Start real dashboards in the background; yields ``start(runs_dir) -> port``."""
+    started = []
+
+    def start(runs_dir):
+        dashboard = server.make_server(runs_dir, 0)
+        threading.Thread(target=dashboard.serve_forever, daemon=True).start()
+        started.append(dashboard)
+        return dashboard.server_address[1]
+
+    yield start
+    for dashboard in started:
+        dashboard.shutdown()
+        dashboard.server_close()
+
+
+def _boards(run_dir, checkpoint, mode, size, count):
+    return ",".join([f"{run_dir.name}%7C{checkpoint}%7C{mode}%7C{size}"] * count)
+
+
+@pytest.mark.parametrize(
+    ("sleep", "speed"),
+    [(0.0, 0), (-1.0, 0), (0.1, 10), (0.05, 25), (0.2, 5), (0.5, 2), (2.0, 2), (0.016, 60)],
+)
+def test_speed_for_sleep_picks_the_nearest_replay_speed(sleep, speed):
+    assert speed_for_sleep(sleep) == speed
+
+
+def test_eval_render_opens_the_replay_on_the_dashboard_that_serves_its_runs_folder(
+    render_run, opened, dashboard_on, monkeypatch, capsys
+):
+    def second_dashboard(*args, **kwargs):
+        raise AssertionError("eval --render started a dashboard although one serves the run")
+
+    port = dashboard_on(render_run.parent)
+    monkeypatch.setattr(server, "serve", second_dashboard)
+    args = ["eval", str(render_run), "--render", "--envs", "2", "--stochastic"]
+    args += ["--board-size", "12", "--sleep", "0.2", "--port", str(port)]
+    assert main(args) == 0
+    boards = _boards(render_run, "best", "stochastic", "12", 2)
+    assert opened == [f"http://127.0.0.1:{port}/#tab=replay&boards={boards}&speed=5"]
+    assert f"http://127.0.0.1:{port}/" in capsys.readouterr().out
+
+
+def test_eval_render_serves_the_runs_folder_when_no_dashboard_answers(
+    render_run, opened, monkeypatch
+):
+    served = []
+
+    def interrupted(self, poll_interval=0.5):
+        served.append(Path(self.runs_dir).resolve())
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(server.DashboardServer, "serve_forever", interrupted)
+    last = render_run / "checkpoints" / "last.pt"
+    # nothing can answer on port 0, so a dashboard starts there (on a free port)
+    assert main(["eval", str(last), "--render", "--port", "0"]) == 0
+    assert served == [render_run.parent.resolve()]
+    (url,) = opened
+    boards = _boards(render_run, "last", "greedy", "", 4)
+    assert url.startswith("http://127.0.0.1:")
+    assert url.endswith(f"/#tab=replay&boards={boards}&speed=10")
+
+
+def test_eval_render_starts_its_own_dashboard_when_the_port_serves_another_folder(
+    render_run, opened, dashboard_on, tmp_path, monkeypatch
+):
+    calls = []
+
+    def fake_serve(runs_dir, port=server.DEFAULT_PORT, *, open_browser=False, **options):
+        calls.append((Path(runs_dir).resolve(), port, open_browser, options.get("open_path")))
+        return 0
+
+    other = tmp_path / "other-runs"
+    other.mkdir()
+    port = dashboard_on(other)
+    monkeypatch.setattr(server, "serve", fake_serve)
+    args = ["eval", str(render_run), "--render", "--envs", "1", "--sleep", "0", "--port", str(port)]
+    assert main(args) == 0
+    boards = _boards(render_run, "best", "greedy", "", 1)
+    assert calls == [(render_run.parent.resolve(), 0, True, f"#tab=replay&boards={boards}&speed=0")]
+    assert opened == []
+
+
+@pytest.fixture
+def no_dashboard(monkeypatch, opened):
+    def touched(*args, **kwargs):
+        raise AssertionError("a refused eval --render reached the dashboard")
+
+    monkeypatch.setattr(server, "served_runs_dir", touched)
+    monkeypatch.setattr(server, "serve", touched)
+    yield
+    assert opened == []
+
+
+@pytest.mark.parametrize(
+    ("options", "message"),
+    [
+        (
+            ["--episodes", "1"],
+            "--episodes cannot be combined with --render: the browser replay plays until you "
+            "close it; drop --render to score a fixed number of episodes",
+        ),
+        (["--envs", "5"], "--envs must be 1 to 4 with --render, got 5"),
+        (["--envs", "0"], "--envs must be 1 to 4 with --render, got 0"),
+        (["--board-size", "4"], "--board-size must be at least 5, got 4"),
+    ],
+    ids=["episodes", "too-many-boards", "no-board", "board-too-small"],
+)
+def test_eval_render_refuses_options_the_replay_cannot_honour(
+    render_run, no_dashboard, capsys, options, message
+):
+    assert main(["eval", str(render_run), "--render", *options]) == 2
+    err = capsys.readouterr().err
+    assert f"snakeppo eval: error: {message}" in err
+    assert "Traceback" not in err
+
+
+@pytest.mark.parametrize(
+    "layout",
+    [("model.pt",), ("loose", "checkpoints", "best.pt"), ("copied", "checkpoints", "old.pt")],
+    ids=["outside-a-run", "no-run-json", "not-best-or-last"],
+)
+def test_eval_render_refuses_a_checkpoint_that_is_not_a_runs_best_or_last(
+    render_run, no_dashboard, tmp_path, capsys, layout
+):
+    target = tmp_path.joinpath(*layout)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy(render_run / "checkpoints" / "best.pt", target)
+    if layout[0] == "copied":
+        shutil.copy(render_run / "run.json", tmp_path / "copied" / "run.json")
+    assert main(["eval", str(target), "--render"]) == 2
+    err = capsys.readouterr().err
+    assert (
+        f"snakeppo eval: error: --render plays the best.pt or last.pt checkpoint of a run "
+        f"folder, and {target} is not one; score it with headless 'snakeppo eval {target}'"
+    ) in err
+    assert "Traceback" not in err
 
 
 def test_eval_plays_a_size_agnostic_run_on_another_board(tmp_path, capsys):
@@ -354,3 +501,71 @@ def test_sweep_builds_the_network_once_before_any_seed_starts(
     assert f"snakeppo sweep: error: {message}" in err
     assert "Traceback" not in err
     assert list(tmp_path.iterdir()) == []
+
+
+def _saved_description(monkeypatch, *args):
+    """The train.description ``snakeppo train --config smoke.yaml ARGS`` would save, untrained."""
+    from snakeppo.ppo import trainer
+
+    configs = []
+    monkeypatch.setattr(trainer, "train", lambda config, **kwargs: configs.append(config))
+    assert main(["train", "--config", str(SMOKE), *args]) == 0
+    (config,) = configs
+    return config.train.description
+
+
+@pytest.mark.parametrize(
+    ("args", "suffix"),
+    [
+        ((), ""),
+        (
+            ("--seed", "3", "--name", "x", "--group", "g", "--set", "train.runs_dir=elsewhere"),
+            "",
+        ),
+        (
+            ("--set", "ppo.lr=0.0005", "--set", " train.total_env_steps=1024 ", "--agent", "mlp"),
+            " Changed: ppo.lr=0.0005, train.total_env_steps=1024, agent.name=mlp",
+        ),
+    ],
+    ids=["preset", "bookkeeping-only", "changes"],
+)
+def test_train_saves_the_preset_description_with_its_changes(monkeypatch, args, suffix):
+    preset = load_config(SMOKE).train.description
+    assert _saved_description(monkeypatch, *args) == preset + suffix
+
+
+@pytest.mark.parametrize(
+    ("args", "expected"),
+    [
+        (("--set", "ppo.lr=0.0005", "--set", "train.description=Plain text."), "Plain text."),
+        (("--set", "ppo.lr=0.0005", "--description", "My # note: yes"), "My # note: yes"),
+        (("--description=-starts with a dash",), "-starts with a dash"),
+        (("--description", ""), ""),
+    ],
+    ids=["set", "flag-verbatim", "flag-dash", "flag-empty"],
+)
+def test_an_explicit_description_wins_without_a_suffix(monkeypatch, args, expected):
+    assert _saved_description(monkeypatch, *args) == expected
+
+
+def test_resume_refuses_a_description(tmp_path, capsys):
+    assert main(["train", "--resume", str(tmp_path), "--description", "x"]) == 2
+    assert "cannot be combined with --description" in capsys.readouterr().err
+
+
+def test_sweep_gives_every_seed_its_description(tmp_path, monkeypatch):
+    from snakeppo import sweep
+
+    seen = []
+
+    def run_sweep(seeds, train_args, **kwargs):
+        seen.append(list(train_args))
+        return []
+
+    monkeypatch.setattr(sweep, "run_sweep", run_sweep)
+    args = ["sweep", "--seeds", "1,2", "--config", str(SMOKE)]
+    args += ["--set", f"train.runs_dir={tmp_path.as_posix()}"]
+    assert main([*args, "--description", "-a dash # and: colon"]) == 0
+    assert seen[-1][-1] == "--description=-a dash # and: colon"
+    assert main(args) == 0
+    assert not any(arg.startswith("--description") for arg in seen[-1])

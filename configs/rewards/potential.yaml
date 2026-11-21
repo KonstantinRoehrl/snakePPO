@@ -6,3 +6,6 @@ reward:
   strategy: potential
 train:
   name: reward-potential
+  description: >-
+    Swaps the baseline's hint toward the apple for a textbook form (potential-based shaping)
+    that guides the snake to food without changing which way of playing is best in the end.

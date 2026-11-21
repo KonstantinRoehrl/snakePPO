@@ -5,3 +5,6 @@ curriculum:
   grow: both
 train:
   name: curriculum-both
+  description: >-
+    Grows the arena and the winning length together, from a small board and a short snake to the
+    full game, combining both easier-first ladders.

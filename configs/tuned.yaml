@@ -10,3 +10,8 @@ ppo:
   target_kl: 0.03
 train:
   name: tuned
+  description: >-
+    Turns on every PPO training tweak at once: a learning rate and an exploration bonus that
+    both shrink over the run, a limit on how far the value estimate moves per update, and an
+    early stop when an update changes the policy too much. Shows whether the tweaks help
+    together.

@@ -5,9 +5,10 @@ from datetime import datetime
 import pytest
 
 from snakeppo.builders import observation_record
-from snakeppo.config import Config, apply_overrides, save_config
+from snakeppo.config import Config, Preset, apply_overrides, save_config
 from snakeppo.results import (
     BOOKKEEPING_KEYS,
+    DESCRIPTION_WIDTH,
     PROTOCOL_KEYS,
     Bootstrap,
     config_differences,
@@ -19,6 +20,7 @@ from snakeppo.results import (
     run_score,
     switch_unit,
     switches,
+    truncate,
     verdict,
 )
 from snakeppo.runs import (
@@ -80,6 +82,7 @@ def test_learning_config_drops_bookkeeping_and_switches_skip_protocol_keys():
     )
     assert switches(config) == {"ppo.target_kl": 0.02}
     assert switches(Config()) == {}
+    assert switches(apply_overrides(Config(), ["train.description=Adds a hint."])) == {}
     assert flatten_config(Config())["agent.kwargs"] == {}
     assert config_differences({"a": 1, "b": 2}, {"a": 1, "c": 3}) == {
         "b": (2, None),
@@ -277,3 +280,44 @@ def test_an_architecture_and_a_view_own_their_settings():
     assert switch_unit("observation.view_size") == "observation.view"
     for own in ("observation.tail", "observation.body", "observation.hunger"):
         assert switch_unit(own) == own
+
+
+def test_a_group_shows_its_first_run_s_description_or_its_preset_s(tmp_path):
+    presets = [Preset("rewards/x.yaml", "reward-x", "From the preset.")]
+    runs = [
+        *_group(tmp_path, "base", {1: 2.0, 2: 3.0, 3: 2.5}),
+        _run(tmp_path, "kl", 1, [4.0] * 3, "ppo.target_kl=0.02", "train.description=First."),
+        _run(tmp_path, "kl", 2, [5.0] * 3, "ppo.target_kl=0.02", "train.description=Second."),
+        _run(tmp_path, "kl", 3, [4.5] * 3, "ppo.target_kl=0.02", "train.description=Second."),
+        *_group(
+            tmp_path, "old", {1: 2.0}, "train.name=reward-x", created="2026-11-01T09:00:00+01:00"
+        ),
+    ]
+    table = results_table(runs, presets=presets)
+    kl = _row(table, "kl")
+    # descriptions are bookkeeping: differing texts neither mix a group nor count as a switch
+    assert kl.description == "First." and kl.verdict == "better"
+    assert _row(table, "base").description == "" and _row(table, "base").verdict == "reference"
+    assert _row(table, "old").description == "From the preset."
+    assert _row(results_table(runs), "old").description == ""
+
+
+def test_truncate_cuts_long_text_with_an_ellipsis_on_one_line():
+    assert truncate("Short.") == "Short."
+    assert truncate("a\nb   c") == "a b c"
+    long = "word " * 20
+    cut = truncate(long)
+    assert len(cut) <= DESCRIPTION_WIDTH and cut.endswith("…") and cut.startswith("word word")
+    assert truncate("abcdef", 4) == "abc…"
+
+
+def test_only_the_text_format_truncates_descriptions(tmp_path):
+    text = "Adds a small reward for moving toward the apple, so the snake finds food sooner."
+    runs = _group(tmp_path, "base", {1: 2.0}, f"train.description={text}")
+    table = results_table(runs)
+    header, line = format_results(table).splitlines()
+    assert header.split()[:2] == ["group", "description"]
+    assert truncate(text) in line and text not in line
+    assert text in format_results(table, "markdown")
+    (row,) = csv.DictReader(io.StringIO(format_results(table, "csv")))
+    assert row["description"] == text

@@ -1,12 +1,22 @@
-// The dashboard page: URL-hash state, the run list, and the Live, Compare and Results tabs.
-// Everything shown comes from the read-only GET API in api.js.
+// The dashboard page: URL-hash state, the run list with its run actions, the Live, Compare and
+// Results tabs, and the Launch and Replay views (launch.js, replay.js) it mounts. Data comes from
+// the JSON API in api.js; Stop and Resume go through the same CLI commands a terminal would run.
 
-import { MetricsStore, fetchDiff, fetchResults, fetchRuns } from "./api.js";
-import { ChartBoard, DEFAULT_X, SCORE_MEANING, X_MODES, readTheme, seriesColor } from "./charts.js";
+import { MetricsStore, fetchDiff, fetchResults, fetchRuns, resumeRun, stopRun } from "./api.js";
+import { ChartBoard, DEFAULT_X, SCORE_MEANING, X_MODES, readTheme } from "./charts.js";
+import { runColor, runColorVar } from "./colors.js";
+import { mountLaunch } from "./launch.js";
+import { mountReplay, replayToken } from "./replay.js";
 
 const RUNS_EVERY_MS = 5000;
 const METRICS_EVERY_MS = 2000;
-const TABS = ["live", "compare", "results"];
+const TABS = ["live", "compare", "results", "launch", "replay"];
+const CHART_TABS = ["live", "compare"];
+// Hash keys the app owns; every other key belongs to the shown view (launch.js, replay.js).
+const APP_HASH_KEYS = ["tab", "runs", "x", "group", "baseline"];
+const RESUMABLE = new Set(["interrupted", "stalled", "failed"]);
+// How long a run keeps its "Resuming…" state while the resumed process starts up.
+const RESUME_WAIT_MS = 60000;
 const STATUSES = ["running", "stalled", "finished", "interrupted", "failed", "unknown"];
 const THEME_KEY = "snakeppo.dashboard.theme";
 const SVG_NS = "http:" + "//www.w3.org/2000/svg";
@@ -38,6 +48,8 @@ const state = {
   results: { key: null, payload: null, error: null },
   diff: { key: null, payload: null, error: null },
   metricErrors: new Map(),
+  viewParams: {}, // the shown view's own hash keys, as raw (still encoded) strings
+  actions: new Map(), // run id -> {busy: "stop" | "resume" | null, since, error}
 };
 
 const store = new MetricsStore();
@@ -45,6 +57,9 @@ const rendered = new Map(); // element id -> signature of what it shows, to skip
 const $ = (id) => document.getElementById(id);
 let liveBoard;
 let compareBoard;
+const views = {}; // tab -> {show(params), hide(), onRuns(runs)} for the Launch and Replay tabs
+let shownView = null;
+let shownKey = null;
 
 // ------------------------------------------------------------------ DOM helpers
 function h(tag, props, ...children) {
@@ -99,6 +114,21 @@ function show(node, signature, build) {
 }
 
 const code = (text) => h("code", null, text);
+
+/** A run's (or seed group's) fixed colour as a dot; the name next to it carries the identity. */
+function runDot(id) {
+  return h("span", { class: "run-dot", style: `--run-color: ${runColorVar(id)}`, "aria-hidden": "true" });
+}
+
+/** The focus key of the focused control inside `node`, so a redraw can hand focus back. */
+function focusedKey(node) {
+  const active = document.activeElement;
+  return active && node.contains(active) ? active.dataset?.focusKey : undefined;
+}
+
+function restoreFocus(node, key) {
+  if (key) node.querySelector(`[data-focus-key="${CSS.escape(key)}"]`)?.focus();
+}
 
 // ------------------------------------------------------------------ formatting
 const integer = new Intl.NumberFormat("en-US");
@@ -210,6 +240,9 @@ function readHash() {
   state.x = X_MODES.some((mode) => mode.id === x) ? x : DEFAULT_X;
   state.group = params.group === "1";
   state.baseline = params.baseline ? decode(params.baseline) : "";
+  state.viewParams = Object.fromEntries(
+    Object.entries(params).filter(([key]) => !APP_HASH_KEYS.includes(key)),
+  );
 }
 
 function writeHash() {
@@ -218,8 +251,20 @@ function writeHash() {
   parts.push(`x=${state.x}`);
   if (state.group) parts.push("group=1");
   if (state.baseline) parts.push(`baseline=${encodeURIComponent(state.baseline)}`);
+  for (const [key, value] of Object.entries(state.viewParams)) parts.push(`${key}=${value}`);
   const hash = `#${parts.join("&")}`;
   if (hash !== location.hash) history.replaceState(null, "", hash);
+}
+
+/** `ctx.setHash`: replace the view-owned hash keys with `fields` (raw strings); the tab stays. */
+function setViewHash(fields) {
+  state.viewParams = Object.fromEntries(
+    Object.entries(fields ?? {})
+      .filter(([key, value]) => !APP_HASH_KEYS.includes(key) && value !== null && value !== undefined && value !== "")
+      .map(([key, value]) => [key, String(value)]),
+  );
+  shownKey = viewKey();
+  writeHash();
 }
 
 // ------------------------------------------------------------------ derived state
@@ -343,24 +388,80 @@ function renderFilters() {
   for (const control of form.elements) control.disabled = disabled;
 }
 
+/** What the run's process record says, when the status alone does not. */
+function processNote(run) {
+  if (run.alive === false) return "process gone";
+  if (run.status === "running" && run.alive === true && !run.launch) return "started in the terminal, still stoppable";
+  return null;
+}
+
+/**
+ * The run's action buttons by status: running → Watch + Stop; interrupted, stalled or failed →
+ * Watch + Resume; otherwise Watch. `place` keeps focus keys apart between the list and Live.
+ */
+function runActions(run, place) {
+  const pending = state.actions.get(run.id) ?? {};
+  const label = runLabel(run);
+  const button = (action, text, props = {}) =>
+    h(
+      "button",
+      {
+        type: "button",
+        class: `button button-small${action === "stop" ? " button-danger" : ""}`,
+        dataset: { action, runId: run.id, focusKey: `${place}:${action}:${run.id}` },
+        ...props,
+      },
+      text,
+    );
+  const buttons = [button("watch", "Watch", { "aria-label": `Watch ${label} play` })];
+  if (run.status === "running") {
+    const stopping = Boolean(run.stop_requested) || pending.busy === "stop";
+    buttons.push(
+      stopping
+        ? button("stop", "Stopping…", { "aria-disabled": "true", title: "Stopping… waits for the current update" })
+        : button("stop", "Stop", { "aria-label": `Stop ${label}` }),
+    );
+  } else if (RESUMABLE.has(run.status)) {
+    buttons.push(
+      pending.busy === "resume"
+        ? button("resume", "Resuming…", { "aria-disabled": "true" })
+        : button("resume", "Resume", { "aria-label": `Resume ${label}` }),
+    );
+  }
+  return buttons;
+}
+
+function actionError(run) {
+  const error = state.actions.get(run.id)?.error;
+  return error ? h("p", { class: "inline-error action-error", role: "alert" }, error) : null;
+}
+
 function runItem(run, selected, shared) {
   // A group's seeds share their switches, so the section header names them once instead.
   const switches = run.group ? [] : distinctSwitches(run, shared);
   const all = switchStrings(run);
+  const note = processNote(run);
   return h(
     "li",
-    null,
+    { class: selected ? "run-row is-selected" : "run-row", style: `--run-color: ${runColorVar(run.id)}` },
     h(
       "label",
-      { class: selected ? "run is-selected" : "run", title: all.length ? `${run.id}\n${all.join("\n")}` : run.id },
-      h("input", { type: "checkbox", checked: selected, dataset: { runId: run.id } }),
+      { class: "run", title: all.length ? `${run.id}\n${all.join("\n")}` : run.id },
+      h("input", { type: "checkbox", checked: selected, dataset: { runId: run.id, focusKey: `pick:${run.id}` } }),
       h(
         "span",
         { class: "run-head" },
-        h("span", { class: "run-title" }, run.group ? `seed ${run.seed ?? "?"}` : run.name || run.id),
+        h(
+          "span",
+          { class: "run-name" },
+          runDot(run.id),
+          h("span", { class: "run-title" }, run.group ? `seed ${run.seed ?? "?"}` : run.name || run.id),
+        ),
         badge(run.status),
       ),
+      run.description ? h("span", { class: "run-desc", title: run.description }, run.description) : null,
       h("span", { class: "run-id" }, switches.length ? `${run.id} · ${switches.join(", ")}` : run.id),
+      note ? h("span", { class: "run-note" }, note) : null,
       h(
         "span",
         { class: "run-stats" },
@@ -368,6 +469,8 @@ function runItem(run, selected, shared) {
         h("span", { class: "num" }, scoreText(run)),
       ),
     ),
+    h("div", { class: "run-actions" }, runActions(run, "list")),
+    actionError(run),
   );
 }
 
@@ -409,8 +512,8 @@ function renderSidebar() {
   const toggleLabel = $("sidebar-toggle-label");
   toggleLabel.textContent = state.selected.length ? `Runs (${state.selected.length})` : "Runs";
 
-  const signature = JSON.stringify([runs, state.filters, state.selected]);
-  const focused = document.activeElement?.dataset?.runId;
+  const signature = JSON.stringify([runs, state.filters, state.selected, [...state.actions]]);
+  const focused = focusedKey(list);
   const scrollTop = scroller.scrollTop;
   const changed = show(list, signature, () => {
     if (runs === null) {
@@ -428,7 +531,7 @@ function renderSidebar() {
         "div",
         { class: "empty" },
         h("h3", null, "No runs yet"),
-        h("p", null, "Start a short training run from the repo:"),
+        h("p", null, "Start one from the Launch tab, or a short training run from the repo:"),
         h("p", null, code(SMOKE_COMMAND)),
         h("p", { class: "muted" }, "It appears here within a few seconds."),
       );
@@ -461,7 +564,7 @@ function renderSidebar() {
   });
   if (changed) {
     scroller.scrollTop = scrollTop;
-    if (focused) list.querySelector(`input[data-run-id="${CSS.escape(focused)}"]`)?.focus();
+    restoreFocus(list, focused);
   }
 
   const skipped = $("skipped");
@@ -499,6 +602,51 @@ function toggleRun(id, on) {
   update();
 }
 
+/** Stop or resume `id` through the API; the run list shows the outcome on its next poll. */
+async function runAction(id, action) {
+  if (state.actions.get(id)?.busy) return;
+  state.actions.set(id, { busy: action, since: Date.now(), error: null });
+  update();
+  try {
+    await (action === "stop" ? stopRun(id) : resumeRun(id));
+    // A resumed run reads "interrupted" until its new process writes run.json: keep "Resuming…".
+    if (action === "stop") state.actions.delete(id);
+  } catch (error) {
+    if (error.unreachable) noteProblem(error);
+    const verb = action === "stop" ? "stopped" : "resumed";
+    state.actions.set(id, { busy: null, since: Date.now(), error: `It could not be ${verb}: ${error.message}` });
+  }
+  update();
+  runsLoop.kick();
+}
+
+/** Drop "Resuming…" once the run left its resumable status, or after RESUME_WAIT_MS. */
+function settleActions() {
+  const runs = knownRuns();
+  for (const [id, pending] of state.actions) {
+    if (pending.busy !== "resume") continue;
+    const run = runs.get(id);
+    if (!run || !RESUMABLE.has(run.status) || Date.now() - pending.since > RESUME_WAIT_MS) state.actions.delete(id);
+  }
+}
+
+/** Open the Replay tab with one board playing `id`'s best checkpoint greedily. */
+function watchRun(id) {
+  const boards = replayToken({ run: id, checkpoint: "best", greedy: true, board_size: null });
+  state.viewParams = { ...state.viewParams, boards };
+  state.tab = "replay";
+  update();
+  $("tab-replay").focus();
+}
+
+function onRunAction(event) {
+  const button = event.target.closest("button[data-action]");
+  if (!button || button.getAttribute("aria-disabled") === "true") return;
+  const { action, runId } = button.dataset;
+  if (action === "watch") watchRun(runId);
+  else runAction(runId, action);
+}
+
 function clearFilters() {
   state.filters = { text: "", agent: "", group: "", status: "", switch: "" };
   const form = $("filters");
@@ -517,7 +665,7 @@ function renderTabs() {
   }
   const count = compareRuns().length;
   $("compare-count").textContent = count ? String(count) : "";
-  $("view-controls").hidden = state.tab === "results";
+  $("view-controls").hidden = !CHART_TABS.includes(state.tab);
   $("group-control").hidden = state.tab !== "compare";
   for (const input of $("x-control").querySelectorAll("input")) input.checked = input.value === state.x;
   $("group-toggle").checked = state.group;
@@ -530,6 +678,21 @@ function buildXControl() {
       h("label", null, h("input", { type: "radio", name: "x", value: mode.id }), h("span", null, mode.label)),
     );
   }
+}
+
+function viewKey() {
+  return JSON.stringify([state.tab, state.viewParams]);
+}
+
+/** Show the active tab's view (Launch, Replay) when it opens or its hash keys change. */
+function renderView() {
+  const view = views[state.tab] ?? null;
+  if (shownView && shownView !== view) shownView.hide();
+  const key = viewKey();
+  const changed = view !== shownView || key !== shownKey;
+  shownView = view;
+  shownKey = key;
+  if (view && changed) view.show({ ...state.viewParams });
 }
 
 function selectTab(tab, focus = false) {
@@ -574,7 +737,9 @@ function renderLive() {
   }
   boardNode.hidden = false;
   const ticked = compareRuns().length;
-  show(header, JSON.stringify([run, ticked, state.runsSeenAt]), () => liveHeader(run, ticked));
+  const focused = focusedKey(header);
+  const signature = JSON.stringify([run, ticked, state.runsSeenAt, state.actions.get(run.id) ?? null]);
+  if (show(header, signature, () => liveHeader(run, ticked))) restoreFocus(header, focused);
   renderFreshness();
   renderLiveCharts();
 }
@@ -599,16 +764,26 @@ function liveHeader(run, ticked) {
   if (typeof run.env_steps === "number") {
     facts.push(h("span", { class: "num" }, `${compact.format(run.env_steps)} env steps`));
   }
+  if (run.alive === true && typeof run.pid === "number") facts.push(h("span", { class: "num" }, `pid ${run.pid}`));
   facts.push(h("span", { class: "num" }, scoreText(run)));
   if (run.agent) facts.push(h("span", null, `agent ${run.agent}`));
   if (run.device) facts.push(h("span", null, `on ${run.device}`));
   const shared = sharedSwitches(state.runs ?? []);
   const switches = [...distinctSwitches(run, shared), ...switchStrings(run).filter((text) => shared.has(text))];
   const title = run.group ? runLabel(run) : run.name || run.id;
+  const stopping = run.status === "running" && (Boolean(run.stop_requested) || state.actions.get(run.id)?.busy === "stop");
   const pieces = [
-    h("div", { class: "run-header-top" }, h("h2", null, title), badge(run.status)),
+    h("div", { class: "run-header-top" }, runDot(run.id), h("h2", null, title), badge(run.status)),
     title !== run.id ? h("p", { class: "muted" }, run.id) : null,
     h("div", { class: "run-facts" }, facts),
+    h(
+      "div",
+      { class: "run-actions" },
+      runActions(run, "live"),
+      stopping ? h("span", { class: "muted", role: "status" }, "Stopping… waits for the current update") : null,
+    ),
+    actionError(run),
+    run.description ? h("p", { class: "run-description" }, run.description) : null,
     h(
       "div",
       { class: "chips", "aria-label": "Switches" },
@@ -635,7 +810,7 @@ function liveHeader(run, ticked) {
         h(
           "p",
           null,
-          "No metrics for longer than the stall window; the process may be gone. Resume it with ",
+          "No metrics for longer than the stall window, or its process is gone. Resume continues it from its last checkpoint; in a terminal that is ",
           code(`uv run snakeppo train --resume ${state.runsDir ?? "<runs folder>"}/${run.id}`),
           ".",
         ),
@@ -675,7 +850,7 @@ function renderLiveCharts() {
   }
   const theme = readTheme();
   liveBoard.render({
-    runs: [{ id: run.id, label: runLabel(run), color: seriesColor(theme, 0), lines: store.lines(run.id) }],
+    runs: [{ id: run.id, label: runLabel(run), color: runColor(theme, run.id), lines: store.lines(run.id) }],
     xMode: state.x,
     theme,
   });
@@ -711,9 +886,53 @@ function renderCompareNotice(runs) {
   );
 }
 
+/** One legend entry per drawn line: each run, or each seed group while Group seeds is on. */
+function compareEntries(runs) {
+  if (!state.group) return runs.map((run) => ({ id: run.id, label: runLabel(run), description: run.description ?? "" }));
+  const entries = new Map();
+  for (const run of runs) {
+    const id = run.group ?? run.id;
+    if (!entries.has(id)) entries.set(id, { id, label: run.group ?? runLabel(run), description: run.description ?? "", seeds: 0 });
+    entries.get(id).seeds += 1;
+  }
+  return [...entries.values()].map(({ seeds, ...entry }) => ({
+    ...entry,
+    label: seeds > 1 ? `${entry.label} (${seeds} seeds)` : entry.label,
+  }));
+}
+
+function renderCompareLegend(runs) {
+  const node = $("compare-legend");
+  const entries = state.runs !== null && runs.length >= 2 ? compareEntries(runs) : [];
+  node.hidden = entries.length === 0;
+  show(node, JSON.stringify([state.group, entries]), () =>
+    entries.length
+      ? h(
+          "section",
+          { class: "card legend-card", "aria-labelledby": "compare-legend-title" },
+          h("h3", { id: "compare-legend-title" }, state.group ? "Selected groups" : "Selected runs"),
+          h(
+            "ul",
+            { class: "legend-list" },
+            entries.map((entry) =>
+              h(
+                "li",
+                null,
+                runDot(entry.id),
+                h("span", { class: "legend-name" }, entry.label),
+                entry.description ? h("span", { class: "legend-desc" }, entry.description) : null,
+              ),
+            ),
+          ),
+        )
+      : [],
+  );
+}
+
 function renderCompare() {
   const runs = compareRuns();
   renderCompareNotice(runs);
+  renderCompareLegend(runs);
   const empty = $("compare-empty");
   const boardNode = $("compare-board");
   const diffNode = $("compare-diff");
@@ -760,13 +979,14 @@ function compareGroups(runs, theme) {
   const groups = new Map();
   for (const run of runs) {
     const id = run.group ?? `run:${run.id}`;
-    if (!groups.has(id)) groups.set(id, { id, label: run.group ?? runLabel(run), runs: [] });
+    if (!groups.has(id)) {
+      groups.set(id, { id, label: run.group ?? runLabel(run), color: runColor(theme, run.group ?? run.id), runs: [] });
+    }
     groups.get(id).runs.push({ id: run.id, lines: store.lines(run.id) });
   }
-  return [...groups.values()].map((group, index) => ({
+  return [...groups.values()].map((group) => ({
     ...group,
     label: group.runs.length > 1 ? `${group.label} (${group.runs.length} seeds)` : group.label,
-    color: seriesColor(theme, index),
   }));
 }
 
@@ -782,10 +1002,10 @@ function renderCompareCharts() {
     compareBoard.render({ groups: compareGroups(runs, theme), xMode: state.x, theme });
   } else {
     compareBoard.render({
-      runs: runs.map((run, index) => ({
+      runs: runs.map((run) => ({
         id: run.id,
         label: runLabel(run),
-        color: seriesColor(theme, index),
+        color: runColor(theme, run.id),
         lines: store.lines(run.id),
       })),
       xMode: state.x,
@@ -949,7 +1169,12 @@ function resultRows(row, { waiting, showReference }) {
   }
   notes.push(...(row.notes ?? []));
   const cells = [
-    h("td", null, h("strong", null, row.group)),
+    h(
+      "td",
+      null,
+      h("span", { class: "group-cell" }, runDot(row.group), h("strong", null, row.group)),
+      row.description ? h("span", { class: "cell-sub" }, row.description) : null,
+    ),
     h("td", { class: "nowrap" }, typeof row.budget === "number" ? integer.format(row.budget) : "-"),
     h("td", null, `${row.finished}/${row.seeds}`),
     h("td", { class: "nowrap" }, score),
@@ -1086,6 +1311,7 @@ function update() {
   if (state.tab === "live") renderLive();
   if (state.tab === "compare") renderCompare();
   if (state.tab === "results") renderResults();
+  renderView();
   metricsLoop.kick();
 }
 
@@ -1138,12 +1364,14 @@ const runsLoop = every(RUNS_EVERY_MS, async () => {
     state.skipped = payload.skipped ?? [];
     state.runsDir = payload.runs_dir ?? null;
     state.runsSeenAt = Date.now();
+    settleActions();
     clearProblem();
   } catch (error) {
     noteProblem(error);
     return;
   }
   update();
+  for (const view of Object.values(views)) view.onRuns(state.runs);
   if (state.tab === "results") await refreshResults();
 });
 
@@ -1226,6 +1454,8 @@ function wire() {
     const id = event.target.dataset?.runId;
     if (id) toggleRun(id, event.target.checked);
   });
+  $("run-list").addEventListener("click", onRunAction);
+  $("live-header").addEventListener("click", onRunAction);
 
   const tablist = document.querySelector('[role="tablist"]');
   tablist.addEventListener("click", (event) => {
@@ -1248,6 +1478,7 @@ function wire() {
   $("group-toggle").addEventListener("change", (event) => {
     state.group = event.target.checked;
     writeHash();
+    renderCompareLegend(compareRuns());
     redrawCharts();
   });
   $("baseline-picker").addEventListener("change", (event) => {
@@ -1287,6 +1518,14 @@ function wire() {
 function start() {
   liveBoard = new ChartBoard($("live-board"), "live");
   compareBoard = new ChartBoard($("compare-board"), "compare");
+  const ctx = {
+    runs: () => state.runs,
+    theme: () => readTheme(document.documentElement),
+    refreshRuns: () => runsLoop.kick(),
+    setHash: setViewHash,
+  };
+  views.launch = mountLaunch($("launch-root"), ctx);
+  views.replay = mountReplay($("replay-root"), ctx);
   buildXControl();
   for (const input of $("theme-control").querySelectorAll("input")) input.checked = input.value === storedTheme();
   readHash();

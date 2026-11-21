@@ -6,3 +6,6 @@ observation:
   body: order
 train:
   name: observation-body-order
+  description: >-
+    Shows the body as a fade from head to tail instead of one flat value, so the network can
+    tell which way the body runs and which end moves away first.

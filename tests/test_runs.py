@@ -9,7 +9,9 @@ import yaml
 
 from snakeppo.builders import capture_rng_state
 from snakeppo.config import Config, apply_overrides, save_config
+from snakeppo.processes import process_record
 from snakeppo.runs import (
+    RESUMABLE_SCHEMAS,
     SCHEMA_VERSION,
     MetricsLogger,
     create_run_dir,
@@ -79,14 +81,26 @@ def test_run_info_records_schema_identity_and_v2_fields(tmp_path):
         observation=local,
     )
     assert json.loads((run_dir / "run.json").read_text("utf-8")) == info == read_run_info(run_dir)
-    assert info["schema_version"] == SCHEMA_VERSION == 4
+    assert info["schema_version"] == SCHEMA_VERSION == 5
+    assert RESUMABLE_SCHEMAS == (2, 3, 4, 5)
     assert info["observation"] == local
     assert {"name", "created", "git_sha", "agent", "param_count", "device"} <= info.keys()
     assert info["status"] == "running"
     assert info["total_updates"] == 40
     assert info["group"] == "demo@20261107-093000"
     assert info["resumed"] == []
+    assert info["process"] is None and info["launch"] is None  # always written, null by default
     assert not list(run_dir.glob(".*.tmp"))
+
+
+def test_run_info_records_the_training_process_and_its_launch(tmp_path):
+    run_dir = create_run_dir(tmp_path, "demo", 3, now=NOW)
+    record = process_record()
+    info = write_run_info(
+        run_dir, name="demo", process=record, launch="20261119-101500-a1b2c3", **RUN_INFO
+    )
+    assert read_run_info(run_dir) == info
+    assert info["process"] == record and info["launch"] == "20261119-101500-a1b2c3"
 
 
 def test_update_run_info_rewrites_fields_and_rejects_derived_statuses(tmp_path):
@@ -179,6 +193,42 @@ def test_derive_status_reports_stored_status_and_stalls(stored, seconds_since_wr
     assert status == expected
 
 
+def _dead_record():
+    """A record of this process with a creation time it does not have: a recycled pid."""
+    record = process_record()
+    return {**record, "started": record["started"] - 1000.0}
+
+
+@pytest.mark.parametrize(
+    ("process", "seconds_since_write", "expected"),
+    [
+        ("alive", 1e6, "running"),  # a live trainer is running however long an update takes
+        ("dead", 0.0, "stalled"),  # its process is gone: stalled at once
+        ("elsewhere", 10.0, "running"),  # another host: the write-time rule decides
+        ("elsewhere", 61.0, "stalled"),
+        ("malformed", 61.0, "stalled"),
+    ],
+)
+def test_a_running_run_with_a_process_record_is_judged_by_liveness(
+    process, seconds_since_write, expected
+):
+    records = {
+        "alive": process_record(),
+        "dead": _dead_record(),
+        "elsewhere": {**process_record(), "host": "another-machine.invalid"},
+        "malformed": {"pid": "nope"},
+    }
+    info = {"schema_version": 5, "status": "running", "process": records[process]}
+    status = derive_status(info, Config(), _lines(1, 2), 1000.0, 1000.0 + seconds_since_write)
+    assert status == expected
+
+
+def test_liveness_never_overrides_a_status_the_trainer_wrote():
+    for stored in ("finished", "interrupted", "failed"):
+        info = {"schema_version": 5, "status": stored, "process": process_record()}
+        assert derive_status(info, Config(), _lines(1, 2), 1000.0, 1000.0) == stored
+
+
 def test_schema_1_status_is_inferred_from_progress():
     config = apply_overrides(
         Config(), ["train.total_env_steps=40", "ppo.rollout_steps=1", "env.num_envs=10"]
@@ -196,6 +246,8 @@ def test_load_run_reads_a_v2_run_and_a_v1_run(tmp_path):
     assert record.status == "running" and record.update == 3 and record.env_steps == 300
     assert record.total_updates == 3
     assert load_run(v2, now=(v2 / "metrics.jsonl").stat().st_mtime + 120).status == "stalled"
+    update_run_info(v2, process=_dead_record())
+    assert load_run(v2).status == "stalled"  # fresh metrics, but the trainer is gone
 
     v1 = create_run_dir(tmp_path / "b", "old", 1, now=NOW)
     old_info = {"schema_version": 1, "name": "old", "agent": "cnn", "device": "cpu"}

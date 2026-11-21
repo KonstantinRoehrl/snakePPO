@@ -5,3 +5,6 @@ reward:
   strategy: sparse
 train:
   name: reward-sparse
+  description: >-
+    Drops every hint: a reward only for eating an apple and a penalty for dying, which shows how
+    much the baseline's hints help.

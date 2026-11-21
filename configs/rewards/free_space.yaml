@@ -5,3 +5,6 @@ reward:
   strategy: free_space
 train:
   name: reward-free-space
+  description: >-
+    Adds a penalty when a move cuts the head off from part of the free board, to teach the snake
+    not to trap itself.

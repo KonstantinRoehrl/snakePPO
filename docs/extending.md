@@ -15,12 +15,12 @@
    clear error, and `make_policy` rejects the local view, whose side is odd. Pass
    `size_agnostic=True` only if a model built for one board size runs on any other size of
    at least 5 (a pool before every size-dependent layer); `snakeppo agents` shows it as
-   `any size` and `snakeppo eval --board-size` relies on it.
+   `any size`, and `snakeppo eval --board-size` and Replay's board-size choice rely on it.
 3. In `tests/test_agents.py`, add the name to `SIZE_AGNOSTIC` or `BOARD_BOUND` (the shape and
    size tests run over both) and to the `available_agents()` expectation; the even-board
    test lists the networks with `requires_even_board`.
 4. Check it with `uv run snakeppo agents`, train it with `--agent <name>`, and add
-   `configs/agents/<name>.yaml`. On a CUDA machine, run
+   `configs/agents/<name>.yaml` (see Add a preset). On a CUDA machine, run
    `uv run pytest tests/test_training.py -k cuda`: it trains every registered architecture
    with `train.deterministic: true`.
 
@@ -43,8 +43,9 @@ as `RecurrentCNNPolicy` does:
   whole envs and replays each group with `unroll` from the rollout's start state, with
   `episode_starts(done)` as `starts`, so that count must divide `env.num_envs`
   (`make_policy` refuses the config otherwise).
-- **Playing.** `evaluate` and `snakeppo eval --render` play through `PolicyPlayer`, which keeps
-  one state per game and resets it when the game's episode ends.
+- **Playing.** `evaluate` and the dashboard's Replay (also opened by `snakeppo eval --render`)
+  play through `PolicyPlayer`, which keeps one state per game and resets it when the game's
+  episode ends.
 - Add the new architecture's cases to `tests/test_recurrent.py` (shapes, `unroll` equals one
   `forward` per step, a replayed rollout reproduces its log-probs) and a smoke train to
   `tests/test_recurrent_training.py`.
@@ -60,7 +61,7 @@ as `RecurrentCNNPolicy` does:
 5. Add a test proving that with the default value training behaves exactly as before.
 6. Turn a PPO switch on in `configs/tuned.yaml`; a reward, curriculum or observation switch
    gets its own preset under `configs/rewards/`, `configs/curriculum/` or
-   `configs/observation/` instead. Add it to the switch table
+   `configs/observation/` instead (see Add a preset). Add it to the switch table
    in [experiments.md](experiments.md#switches).
 
 ## Add a reward strategy
@@ -72,7 +73,7 @@ as `RecurrentCNNPolicy` does:
    `__call__(self, step: StepContext) -> torch.Tensor` and `register` a `RewardSpec` that
    builds it from the `RewardConfig` and the discount.
 3. Add hand-computed tests to `tests/test_rewards.py`.
-4. Add `configs/rewards/<name>.yaml` and the rows in
+4. Add `configs/rewards/<name>.yaml` (see Add a preset) and the rows in
    [experiments.md](experiments.md#reward-strategies).
 
 ## Add an observation variant
@@ -95,10 +96,19 @@ the `observation` config section, and built by `TorchSnakeEnv.observe` in
    as `hunger` is.
 4. Nothing else needs to change: `make_policy` and `load_policy` in `src/snakeppo/builders.py`
    take the network's input side and channel count from the spec, and `run.json` and every
-   checkpoint record it. `render_grid` stays the 4-channel display grid, and
-   `Viewer.draw(grids, scores, body_order)` in `src/snakeppo/viewer.py` reads it with the
-   `render_body_order` grid, whatever the policy observes.
+   checkpoint record it. `render_grid` stays the 4-channel display grid that Replay's frames
+   (`src/snakeppo/dashboard/replay.py`) are drawn from, whatever the policy observes.
 5. Test the values with hand-built snakes (`place_snake`) in `tests/test_env.py` and the
    helper in `tests/test_observation.py`, train it end to end in `tests/test_training.py`
-   (`OBSERVATION_SWITCHES`), and add `configs/observation/<name>.yaml` and the switch-table
-   row in [experiments.md](experiments.md#switches).
+   (`OBSERVATION_SWITCHES`), and add `configs/observation/<name>.yaml` (see Add a preset) and the
+   switch-table row in [experiments.md](experiments.md#switches).
+
+## Add a preset
+
+A preset is a YAML file under `configs/`; the dashboard's Launch tab lists every `*.yaml` there,
+in subfolders too. Give it a `train.name` and a `train.description`: one or two plain
+sentences, for someone not deep in the field, saying what the run changes from
+`configs/baseline.yaml` and why that may help, for example "Adds a small reward for moving
+toward the apple." The header comment stays the maintainer's note. Runs trained from the preset
+show the description, and older runs with the same `train.name` borrow it (see
+[experiments.md](experiments.md#descriptions)). It never affects training.

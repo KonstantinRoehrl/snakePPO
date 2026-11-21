@@ -15,3 +15,6 @@ train:
   eval_episodes: 4
   device: cpu
   name: smoke
+  description: >-
+    The tiny test run: a few seconds on a small board, used by the test suite and CI to check
+    that training works. Its scores mean nothing.

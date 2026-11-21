@@ -241,7 +241,7 @@ class TorchSnakeEnv:
     def render_body_order(self) -> torch.Tensor:
         """Unrotated (N, S, S) float32 body order (head 1.0 down to the tail's 0.1), for display.
 
-        Independent of ``observation.body``: the viewer reads it to shade the body.
+        Independent of ``observation.body``, so a display can shade any run's body.
         """
         return body_order_grid(self.body_positions, self.snake_len, self.board_size)
 

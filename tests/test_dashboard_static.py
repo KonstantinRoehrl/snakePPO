@@ -11,7 +11,19 @@ import pytest
 from snakeppo.dashboard.server import make_server, static_dir
 
 STATIC = Path(str(static_dir()))
-EXPECTED_FILES = {"index.html", "app.js", "api.js", "charts.js", "style.css"}
+EXPECTED_FILES = {
+    "index.html",
+    "app.js",
+    "api.js",
+    "charts.js",
+    "colors.js",
+    "board.js",
+    "launch.js",
+    "replay.js",
+    "style.css",
+    "launch.css",
+    "replay.css",
+}
 
 
 def _shipped():
@@ -65,3 +77,17 @@ def test_nothing_is_loaded_from_the_internet():
     for path in _shipped():
         text = path.read_text("utf-8")
         assert not re.search(r"https?://", text), f"{path.name} names an external URL"
+
+
+def test_every_run_colour_slot_has_a_light_and_two_matching_dark_tokens():
+    size = re.search(r"RUN_PALETTE_SIZE = (\d+);", (STATIC / "colors.js").read_text("utf-8"))
+    assert size, "colors.js defines RUN_PALETTE_SIZE"
+    css = (STATIC / "style.css").read_text("utf-8")
+    values: dict[int, list[str]] = {}
+    for slot, value in re.findall(r"--run-(\d+):\s*(#[0-9a-fA-F]{6});", css):
+        values.setdefault(int(slot), []).append(value.lower())
+    assert sorted(values) == list(range(1, int(size.group(1)) + 1))
+    for slot, found in values.items():
+        # :root (light), the prefers-color-scheme dark block, then :root[data-theme="dark"].
+        assert len(found) == 3, f"--run-{slot} is defined {len(found)} times, expected 3"
+        assert found[1] == found[2], f"--run-{slot} differs between the two dark blocks"

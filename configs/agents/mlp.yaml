@@ -5,3 +5,7 @@ agent:
   name: mlp
 train:
   name: agent-mlp
+  description: >-
+    Swaps the image network for a plain one that reads the board as a flat list of numbers, with
+    no sense of which cells are neighbours; shows how much that sense of space helps. Plays only
+    the board size it trained on.

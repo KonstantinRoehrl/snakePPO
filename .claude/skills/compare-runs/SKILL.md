@@ -14,6 +14,8 @@ description: Use when asked to compare finished runs or judge whether a switch h
    learning switch changed, or fewer than 3 paired finished seeds. Report the reason; never turn a
    withheld or inconclusive result into a claim. The full rules are in `docs/experiments.md`
    § Comparing runs.
-3. For training curves, point to `uv run snakeppo serve` (the read-only dashboard;
-   `uv run tensorboard --logdir runs` still works).
-4. `uv run snakeppo compare [runs/…]` stays the quick per-run table of best and last eval scores.
+3. For training curves, point to `uv run snakeppo serve` (the local dashboard, which also shows
+   each run's colour and description; `uv run tensorboard --logdir runs` still works). To see
+   how a model actually plays, `uv run snakeppo eval runs/<run> --render` opens it in Replay.
+4. `uv run snakeppo compare [runs/…]` stays the quick per-run table of best and last eval scores,
+   with each run's description.
